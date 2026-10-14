@@ -116,9 +116,9 @@ files_fts    FTS5 镜像（filename/path/notes）
 ## 开发
 
 ```bash
-pnpm install
-pnpm dev            # 浏览器开发（mock 数据）
-pnpm dev:tauri      # Tauri 开发模式
+npm install
+npm run dev            # 浏览器开发（mock 数据）
+npm run dev:tauri      # Tauri 开发模式
 ```
 
 ## 构建

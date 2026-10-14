@@ -39,6 +39,7 @@ cp -f "$ROOT_DIR/src-tauri/tauri.conf.json" \
       "$ROOT_DIR/src-tauri/app-icon.svg" \
       "$ROOT_DIR/src-tauri/Cargo.toml" \
       "$ROOT_DIR/src-tauri/build.rs" \
+      "$ROOT_DIR/src-tauri/WebView2Loader.dll" \
       "$DEST/src-tauri/" 2>/dev/null || true
 
 # Tauri 权限配置（capabilities 改了不同步 → 打包版用旧权限）
