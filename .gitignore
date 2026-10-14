@@ -1,0 +1,14 @@
+node_modules/
+dist/
+target/
+*.log
+.DS_Store
+Thumbs.db
+.pixvault/
+
+# 临时文件
+_tmp_*
+
+# 本地构建产物（dmg/msi/exe 不纳入版本管理，由 CI 产出）
+*.dmg
+*.msi

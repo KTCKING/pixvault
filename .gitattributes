@@ -1,0 +1,19 @@
+# 默认：由 Git 自动判断文本文件，仓库内统一存为 LF
+* text=auto
+
+# Shell 脚本必须在 macOS/Linux 保持 LF，否则会报 $'\r': command not found
+*.sh text eol=lf
+*.bash text eol=lf
+
+# 明确标记二进制文件，避免行尾转换损坏
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.dll binary
+*.woff binary
+*.woff2 binary
+*.ttf binary

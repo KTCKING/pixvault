@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="1000" height="1000">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4c6ef5"/>
+      <stop offset="100%" stop-color="#7950f2"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#eef1ff"/>
+    </linearGradient>
+    <linearGradient id="hill1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5c7cfa"/>
+      <stop offset="100%" stop-color="#4263eb"/>
+    </linearGradient>
+    <linearGradient id="hill2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7950f2"/>
+      <stop offset="100%" stop-color="#6741d9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background rounded square -->
+  <rect x="0" y="0" width="1000" height="1000" rx="224" fill="url(#bg)"/>
+  <rect x="0.5" y="0.5" width="999" height="999" rx="223.5" fill="none" stroke="#ffffff" stroke-opacity="0.14" stroke-width="1"/>
+
+  <!-- Photo card -->
+  <rect x="215" y="140" width="570" height="470" rx="60" fill="url(#card)"/>
+  <rect x="215" y="140" width="570" height="470" rx="60" fill="none" stroke="#ffffff" stroke-opacity="0.9" stroke-width="4"/>
+
+  <!-- Sun -->
+  <circle cx="370" cy="290" r="58" fill="#fab005"/>
+  <circle cx="370" cy="290" r="58" fill="none" stroke="#f08c00" stroke-width="6" opacity="0.35"/>
+
+  <!-- Mountains -->
+  <path d="M245 560 L430 380 L545 500 L640 400 L755 560 Z" fill="url(#hill1)"/>
+  <path d="M430 380 L545 500 L610 445 L755 560 L640 560 Z" fill="url(#hill2)" opacity="0.9"/>
+
+  <!-- Color label dots (Pixcall 式 7 色标记) -->
+  <circle cx="200" cy="782" r="46" fill="#e03131"/>
+  <circle cx="300" cy="782" r="46" fill="#f76707"/>
+  <circle cx="400" cy="782" r="46" fill="#f59f00"/>
+  <circle cx="500" cy="782" r="46" fill="#2f9e44"/>
+  <circle cx="600" cy="782" r="46" fill="#1971c2"/>
+  <circle cx="700" cy="782" r="46" fill="#9c36b5"/>
+  <circle cx="800" cy="782" r="46" fill="#868e96"/>
+
+  <!-- Sparkles -->
+  <circle cx="180" cy="200" r="10" fill="#ffffff" opacity="0.9"/>
+  <circle cx="830" cy="180" r="7" fill="#ffffff" opacity="0.7"/>
+  <circle cx="860" cy="640" r="8" fill="#ffffff" opacity="0.55"/>
+</svg>

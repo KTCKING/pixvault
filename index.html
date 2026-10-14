@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/pixvault.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PixVault</title>
+    <style>
+      /* JS 未加载时的兜底提示（#root 为空时显示，JS 挂载后自动消失） */
+      #root:empty::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background: #ffffff;
+      }
+      #root:empty::after {
+        content: "PixVault 加载中...";
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-family: 'Segoe UI', sans-serif;
+        font-size: 14px;
+        color: #6b7280;
+      }
+      .dark #root:empty::before {
+        background: #0d1117;
+      }
+      .dark #root:empty::after {
+        color: #8b949e;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body class="bg-surface-950 text-surface-100 overflow-hidden">
+    <!--
+      启动加载动画：必须放在 #root 之外，由 main.tsx 在挂载完成后移除。
+      原因：Solid 的 render() 只向挂载容器追加、不清空已有子节点（与 React 不同），
+      若把它放在 #root 内，会永久遮挡应用界面。
+    -->
+    <div id="boot-splash" style="position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:var(--bg-primary,#fff);">
+      <div style="width:40px;height:40px;border:3px solid #e5e7eb;border-top-color:#4c6ef5;border-radius:50%;animation:spin 0.8s linear infinite;"></div>
+      <div style="font-family:'Segoe UI',sans-serif;font-size:14px;color:#6b7280;">PixVault 加载中...</div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

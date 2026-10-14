@@ -1,0 +1,13 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for PrismVault",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "drag:default",
+    "fs:default",
+    "shell:default",
+    "opener:default"
+  ]
+}

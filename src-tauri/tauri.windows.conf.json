@@ -1,0 +1,12 @@
+{
+  "bundle": {
+    "resources": [
+      "WebView2Loader.dll"
+    ],
+    "windows": {
+      "nsis": {
+        "languages": ["English", "SimpChinese"]
+      }
+    }
+  }
+}

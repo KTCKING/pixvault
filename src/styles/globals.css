@@ -1,0 +1,292 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Theme Variables ──────────────────────────── */
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8f9fa;
+  --bg-tertiary: #f1f3f5;
+  --bg-hover: #e9ecef;
+  --border-color: #dee2e6;
+  --border-light: #e9ecef;
+  --text-primary: #212529;
+  --text-secondary: #495057;
+  --text-muted: #868e96;
+  --text-inverse: #ffffff;
+  --accent: #4c6ef5;
+  --accent-hover: #4263eb;
+  --accent-bg: #edf2ff;
+  --danger: #e03131;
+  --star-color: #f59f00;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+  --shadow-lg: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.dark {
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --bg-hover: #30363d;
+  --border-color: #30363d;
+  --border-light: #21262d;
+  --text-primary: #e6edf3;
+  --text-secondary: #c9d1d9;
+  --text-muted: #8b949e;
+  --text-inverse: #0d1117;
+  --accent: #5c7cfa;
+  --accent-hover: #748ffc;
+  --accent-bg: #1a2332;
+  --danger: #ff6b6b;
+  --star-color: #fcc419;
+  --shadow: 0 1px 3px rgba(0,0,0,0.3);
+  --shadow-lg: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+/* ── Base ─────────────────────────────────────── */
+@layer base {
+  * {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .allow-select {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  html, body, #root {
+    @apply h-full w-full m-0 p-0 overflow-hidden;
+    font-family: 'Segoe UI', 'SF Pro Text', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+  }
+
+  body {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    transition: background-color 0.2s, color 0.2s;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--text-muted);
+    border-radius: 999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--text-secondary);
+  }
+}
+
+/* ── Components ───────────────────────────────── */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md
+           text-sm font-medium transition-all duration-150
+           focus:outline-none focus:ring-2 focus:ring-offset-1
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: white;
+    border: 1px solid var(--accent);
+  }
+  .btn-primary:hover {
+    background: var(--accent-hover);
+  }
+
+  .btn-secondary {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+  }
+  .btn-secondary:hover {
+    background: var(--bg-hover);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid transparent;
+  }
+  .btn-ghost:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .btn-danger {
+    background: var(--danger);
+    color: white;
+    border: 1px solid var(--danger);
+    opacity: 0.85;
+  }
+  .btn-danger:hover {
+    opacity: 1;
+  }
+
+  .input {
+    @apply w-full px-3 py-1.5 rounded-md text-sm
+           focus:outline-none focus:ring-2 focus:ring-offset-1
+           transition-all duration-150;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+  }
+  .input::placeholder {
+    color: var(--text-muted);
+  }
+  .input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+}
+
+/* ── Thumbnail Grid ───────────────────────────── */
+.thumbnail-card {
+  @apply relative rounded-lg overflow-hidden cursor-pointer
+         transition-all duration-100;
+  background: var(--bg-secondary);
+  border: 2px solid transparent;
+  box-shadow: var(--shadow);
+  /* 2400 张图全在 DOM 里时，让浏览器跳过视口外卡片的样式/布局/绘制。
+     卡片高度是显式写死的（size+40px），所以容器高度不受影响，
+     套索选择用的 getBoundingClientRect 也依然准确。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 300px;
+}
+.thumbnail-card:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-lg);
+}
+.thumbnail-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.thumbnail-card:hover .thumbnail-actions {
+  @apply opacity-100;
+}
+
+.thumbnail-actions {
+  @apply absolute bottom-0 left-0 right-0 flex items-center justify-center gap-1
+         p-1.5 opacity-0 transition-opacity duration-100;
+  background: linear-gradient(to top, rgba(0,0,0,0.7), transparent);
+}
+
+/* ── Marquee (drag) Selection Box ─────────────── */
+.marquee-box {
+  position: fixed;
+  z-index: 45;
+  pointer-events: none;
+  border: 1px solid var(--accent);
+  background: rgba(92, 124, 250, 0.16);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+  will-change: left, top, width, height;
+}
+
+/* ── Tag Pills ────────────────────────────────── */
+.tag-pill {
+  @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full
+         text-2xs font-medium transition-colors cursor-pointer;
+}
+
+/* ── Sidebar ──────────────────────────────────── */
+.sidebar-section {
+  @apply px-3 py-2;
+}
+
+.sidebar-item {
+  @apply flex items-center gap-2 px-3 py-1.5 rounded-md text-sm
+         cursor-pointer transition-colors;
+  color: var(--text-secondary);
+}
+.sidebar-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.sidebar-item.active {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+/* ── Virtual Scroll Container ─────────────────── */
+.virtual-scroll-container {
+  @apply flex-1 overflow-auto;
+  contain: strict;
+}
+
+/* ── Status Bar ───────────────────────────────── */
+.status-bar {
+  @apply flex items-center gap-3 px-4 py-1 text-2xs;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-color);
+}
+
+/* ── Drop Zone ────────────────────────────────── */
+.drop-zone {
+  @apply absolute inset-0 flex items-center justify-center z-50;
+  background: rgba(76, 110, 245, 0.08);
+  border: 2px dashed var(--accent);
+}
+
+/* ── Context Menu ─────────────────────────────── */
+.context-menu {
+  @apply absolute z-50 min-w-[180px] py-1 rounded-lg shadow-2xl;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.context-menu-item {
+  @apply flex items-center gap-2 px-3 py-1.5 text-sm
+         cursor-pointer transition-colors;
+  color: var(--text-secondary);
+}
+.context-menu-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* ── Loading Skeleton ─────────────────────────── */
+.skeleton {
+  @apply animate-pulse rounded;
+  background: var(--bg-hover);
+}
+
+/* ── Header ───────────────────────────────────── */
+.app-header {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* ── Info Panel ───────────────────────────────── */
+.info-panel {
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-color);
+}
+
+/* 右侧信息区的属性列表（参考 Pixcall：左标签 / 右值，紧凑分组） */
+.info-section {
+  border-bottom: 1px solid var(--border-color);
+}
+.info-row {
+  @apply flex items-start gap-3 px-3 py-1 text-xs;
+}
+.info-row-label {
+  @apply flex-shrink-0;
+  width: 4.25rem;
+  color: var(--text-muted);
+}
+.info-row-value {
+  @apply flex-1 min-w-0 text-right break-all;
+  color: var(--text-primary);
+}

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" fill="none">
+  <rect width="400" height="300" fill="#1a1a2e"/>
+  <rect x="50" y="40" width="130" height="100" rx="8" fill="#2d2d44"/>
+  <rect x="200" y="40" width="150" height="220" rx="8" fill="#2d2d44"/>
+  <rect x="50" y="160" width="130" height="100" rx="8" fill="#2d2d44"/>
+  <circle cx="115" cy="80" r="20" fill="#3b3b5c"/>
+  <circle cx="115" cy="200" r="20" fill="#3b3b5c"/>
+  <rect x="220" y="60" width="110" height="80" rx="4" fill="#3b3b5c"/>
+  <rect x="220" y="150" width="110" height="80" rx="4" fill="#3b3b5c"/>
+  <text x="200" y="290" text-anchor="middle" fill="#5c7cfa" font-size="12" font-family="sans-serif">PrismVault</text>
+</svg>
