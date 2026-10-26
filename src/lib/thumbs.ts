@@ -51,8 +51,43 @@ export function setThumbUrl(path: string, url: string | undefined): void {
   ensure(path).set(url);
 }
 
+// ── 模糊占位图（LQIP）─────────────────────────────
+//
+// 和缩略图**分开存**：占位图是 32px 的 data URL，只用来在真图就绪前垫一层
+// 模糊底。两者生命周期不同（占位图会先到、真图到了要盖在上面淡入），所以不
+// 共用一个信号，免得「真图来了」把占位图判定成"已就绪"。
+
+const phAccessors = new Map<string, Accessor0>();
+const phSetters = new Map<string, Setter0>();
+
+function ensurePh(path: string): { get: Accessor0; set: Setter0 } {
+  let get = phAccessors.get(path);
+  let set = phSetters.get(path);
+  if (!get || !set) {
+    const [g, s] = createSignal<string | undefined>(undefined);
+    get = g;
+    set = s as Setter0;
+    phAccessors.set(path, get);
+    phSetters.set(path, set);
+  }
+  return { get, set };
+}
+
+/** 读取某张图已缓存的模糊占位图（undefined = 没有）。 */
+export function placeholderUrl(path: string): string | undefined {
+  return ensurePh(path).get();
+}
+
+/** 写入某张图的模糊占位图。 */
+export function setPlaceholderUrl(path: string, url: string | undefined): void {
+  if (!url) return;
+  ensurePh(path).set(url);
+}
+
 /** 切换图库时清空（旧库的卡片会被整体重建，不会读到陈旧值）。 */
 export function clearThumbUrls(): void {
   accessors.clear();
   setters.clear();
+  phAccessors.clear();
+  phSetters.clear();
 }

@@ -110,9 +110,13 @@ pub async fn close_library(
     id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut engine = state.engine.lock().unwrap();
-    engine.close_library(&id);
-    save_libraries_config(&engine);
+    {
+        let mut engine = state.engine.lock().unwrap();
+        engine.close_library(&id);
+        save_libraries_config(&engine);
+    }
+    // 关掉的库不该在侧边栏留一个永远不动的进度环。
+    state.thumbs.forget_warm(&id);
     Ok(())
 }
 
@@ -264,7 +268,7 @@ pub async fn index_library(
     // 把还没生成缩略图的文件排进后台队列（只查库 + 判存在，毫秒级）。
     let queued = {
         let lib = lib.lock().unwrap();
-        crate::commands::files::enqueue_missing_thumbnails(&state.thumbs, &lib, &library_id)
+        crate::commands::files::enqueue_missing_thumbnails(&state.thumbs, &lib, &library_id, false)
     };
     drop(engine);
 
@@ -416,7 +420,7 @@ pub async fn restore_libraries(
             } else {
                 // 数据库里已经有东西了 —— 顺手把缺的缩略图排进后台队列。
                 let lib = lib.lock().unwrap();
-                crate::commands::files::enqueue_missing_thumbnails(&state.thumbs, &lib, &id);
+                crate::commands::files::enqueue_missing_thumbnails(&state.thumbs, &lib, &id, false);
             }
         }
     }
@@ -463,5 +467,5 @@ fn reindex_in_background(
     save_libraries_config(&engine);
 
     let lib = lib.lock().unwrap();
-    crate::commands::files::enqueue_missing_thumbnails(thumbs, &lib, library_id);
+    crate::commands::files::enqueue_missing_thumbnails(thumbs, &lib, library_id, false);
 }

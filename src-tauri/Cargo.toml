@@ -1,6 +1,6 @@
 [package]
 name = "pixvault"
-version = "0.1.0"
+version = "0.2.0"
 description = "Resource-library style image management desktop app"
 authors = ["KTCKING"]
 edition = "2021"

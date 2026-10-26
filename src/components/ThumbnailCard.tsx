@@ -2,6 +2,7 @@ import { createSignal, createEffect, Show, onMount, onCleanup } from "solid-js";
 import type { FileInfo } from "@/lib/tauri-api";
 import { COLOR_LABELS } from "@/lib/tauri-api";
 import { toDisplaySrc } from "@/lib/thumbs";
+import { IconHeart, IconImage, IconStarFilled } from "@/components/icons";
 
 /** 颜色名 -> hex（与后端色板一致）。 */
 const colorHex = (name: string | null | undefined): string =>
@@ -10,6 +11,8 @@ const colorHex = (name: string | null | undefined): string =>
 interface Props {
   file: FileInfo;
   thumbnailUrl?: string;
+  /** 32px 的模糊占位图（LQIP）。真图就绪前铺在卡片上，避免大片空白。 */
+  placeholderUrl?: string;
   isSelected: boolean;
   size: number;
   onSelect: (multi: boolean) => void;
@@ -17,7 +20,8 @@ interface Props {
   /** 收藏 / 取消收藏。 */
   onFavoriteChange: (favorite: boolean) => void;
   onOpen: () => void;
-  onVisible: () => void;
+  /** 进出视口时通知父组件（父组件据此维护「当前视口窗口」）。 */
+  onVisibleChange?: (inView: boolean) => void;
   onDoubleClick: () => void;
   /** 图片加载失败时的兜底（父组件会换 data URL）。返回 true 表示已换新地址。 */
   onImgError?: (src: string) => Promise<boolean>;
@@ -46,6 +50,11 @@ export function ThumbnailCard(props: Props) {
     return url ? toDisplaySrc(url) : null;
   };
 
+  /**
+   * 模糊占位图。32px 的小图铺满整格，本身已经很糊；真图淡入盖在它上面。
+   */
+  const placeholderSrc = () => (props.placeholderUrl ? toDisplaySrc(props.placeholderUrl) : undefined);
+
   const [imgSrc, setImgSrc] = createSignal<string | null>(null);
 
   createEffect(() => {
@@ -56,19 +65,20 @@ export function ThumbnailCard(props: Props) {
   });
 
   onMount(() => {
-    // Load the thumbnail lazily once the card scrolls into view. Previously
-    // only the first 30 cards ever requested one, so everything further down
-    // fell back to decoding the full-size original image.
+    // 父组件自己按渲染范围算窗口时（网格 / 列表模式的虚拟化）不会传这个回调，
+    // 那就完全不需要观察器 —— 2400 个 IntersectionObserver 的开销不小。
+    if (!props.onVisibleChange) return;
+
+    // 只观察、不请求：进出视口的信号交给父组件，由它攒够一屏后**批量**提交
+    // （并告诉后端这就是当前视口窗口）。以前每张卡片各自 invoke 一次，快速
+    // 下滑时几百个请求同时抢后端那把引擎锁，越滑越慢。
     if (typeof IntersectionObserver === "undefined") {
-      props.onVisible();
+      props.onVisibleChange(true);
       return;
     }
     const io = new IntersectionObserver(
       (entries) => {
-        if (entries.some((e) => e.isIntersecting)) {
-          props.onVisible();
-          io.disconnect();
-        }
+        for (const e of entries) props.onVisibleChange?.(e.isIntersecting);
       },
       { rootMargin: "400px" },
     );
@@ -117,21 +127,31 @@ export function ThumbnailCard(props: Props) {
       onMouseLeave={() => setShowRating(false)}>
 
       <div class="relative overflow-hidden" style={{ background: "var(--bg-tertiary)", height: `${props.size}px` }}>
+        {/* 模糊占位图在最底层：真图（下面那个 opacity 0→1 的 img）盖在它上面淡入。 */}
+        <Show when={placeholderSrc()}>
+          {(src) => (
+            <img src={src()} alt="" aria-hidden="true"
+              class="absolute inset-0 w-full h-full object-cover"
+              draggable={false} decoding="async" />
+          )}
+        </Show>
         <Show when={imgSrc()}>
           {(src) => (
             <img src={src()} alt={props.file.filename}
-              class="w-full h-full object-cover transition-opacity duration-200"
+              class="w-full h-full object-cover transition-opacity duration-200 relative"
               classList={{ "opacity-0": !imgLoaded(), "opacity-100": imgLoaded() }}
               draggable={false} decoding="async"
               onLoad={() => setImgLoaded(true)} onError={handleImgError} />
           )}
         </Show>
-        <Show when={!imgLoaded() && !imgError()}>
+        <Show when={!imgLoaded() && !imgError() && !placeholderSrc()}>
           <div class="absolute inset-0 skeleton" />
         </Show>
         <Show when={imgError()}>
           <div class="absolute inset-0 flex items-center justify-center" style={{ background: "var(--bg-tertiary)" }}>
-            <span class="text-2xl" style={{ color: "var(--text-muted)" }}>🖼️</span>
+            <span style={{ color: "var(--text-muted)" }}>
+              <IconImage size={26} />
+            </span>
           </div>
         </Show>
 
@@ -150,23 +170,24 @@ export function ThumbnailCard(props: Props) {
 
         {/* 收藏：右上角常驻心形 */}
         <Show when={props.file.favorite}>
-          <div class="absolute top-1 right-1 px-1 rounded text-xs"
-            style={{ background: "rgba(0,0,0,0.5)", color: "#ff6b6b" }} title="已收藏">♥</div>
+          <div class="absolute top-1 right-1 p-0.5 rounded" style={{ color: "#ff6b6b" }} title="已收藏">
+            <IconHeart size={12} />
+          </div>
         </Show>
 
         <Show when={showRating() || props.file.rating}>
           <div class="thumbnail-actions">
-            <button class="text-xs transition-colors"
+            <button class="flex items-center transition-colors"
               style={{ color: props.file.favorite ? "#ff6b6b" : "rgba(255,255,255,0.5)" }}
               title={props.file.favorite ? "取消收藏" : "收藏"}
               onClick={(e) => { e.stopPropagation(); props.onFavoriteChange(!props.file.favorite); }}>
-              ♥
+              <IconHeart size={11} />
             </button>
             {[1, 2, 3, 4, 5].map((star) => (
-              <button class="text-xs transition-colors"
+              <button class="flex items-center transition-colors"
                 style={{ color: (props.file.rating || 0) >= star ? "var(--star-color)" : "rgba(255,255,255,0.5)" }}
                 onClick={(e) => { e.stopPropagation(); props.onRatingChange((props.file.rating || 0) >= star ? 0 : star); }}>
-                ★
+                <IconStarFilled size={11} />
               </button>
             ))}
           </div>

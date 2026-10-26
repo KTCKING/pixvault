@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use pixvault_lib::{commands, gpu, AppState};
+use pixvault_lib::{commands, gpu, utils, AppState};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 fn main() {
@@ -68,6 +68,14 @@ fn main() {
 
             builder.build()?;
 
+            // ── 后台任务让路 ──────────────────────────────────────────
+            // 位置很讲究：必须等 WebView2 的浏览器进程已经起来之后再做。
+            // 子进程默认继承父进程的优先级类，提前降级会把 WebView 的渲染 /
+            // GPU 进程一起拖到 Below Normal —— 那就跟「让界面更跟手」的目标
+            // 正好相反了。解码线程的额外降档在建池时挂（engine/thumbs.rs）。
+            let lowered = utils::priority::lower_process();
+            gpu::render_log(&data_dir, &format!("[startup] below_normal_priority={lowered}"));
+
             // 8 秒后注入探针：不管前端 bundle 有没有跑起来，都把 WebView 内部
             // 状态回传一次，写进 render-debug.log。
             let probe_dir = data_dir.clone();
@@ -114,8 +122,15 @@ fn main() {
             commands::files::restore_file,
             commands::files::purge_file,
             commands::files::empty_trash,
+            commands::files::get_thumbnails,
             commands::files::get_thumbnail_path,
             commands::files::get_thumbnail_progress,
+            commands::files::get_warm_progress,
+            commands::files::get_prewarm_enabled,
+            commands::files::set_prewarm_enabled,
+            commands::files::thumbs_interaction,
+            gpu::get_gpu_status,
+            gpu::set_gpu_mode,
             commands::files::get_preview_path,
             commands::files::read_thumb_data_url,
             commands::files::build_missing_thumbnails,

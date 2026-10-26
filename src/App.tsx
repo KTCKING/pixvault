@@ -1,5 +1,5 @@
 import { createSignal, createEffect, For, onMount, onCleanup, Show } from "solid-js";
-import { useLibraryStore } from "@/stores/library";
+import { useLibraryStore, activeLibraryId } from "@/stores/library";
 import { useFilesStore } from "@/stores/files";
 import { useTagsStore } from "@/stores/tags";
 import { useUIStore } from "@/stores/ui";
@@ -10,6 +10,21 @@ import { StatusBar } from "@/components/StatusBar";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { InfoPanel } from "@/components/InfoPanel";
 import { SearchBar } from "@/components/SearchBar";
+import {
+  IconChevronDown,
+  IconChevronLeft,
+  IconChevronRight,
+  IconFolder,
+  IconGlobe,
+  IconLibrary,
+  IconLoader,
+  IconMoon,
+  IconPanelRight,
+  IconSettings,
+  IconSun,
+  StatusDot,
+} from "@/components/icons";
+import { HeroLogo } from "@/components/icons/hero";
 import { ImageViewer } from "@/components/ImageViewer";
 import { IndexingDialog } from "@/components/IndexingDialog";
 import { SettingsModal } from "@/components/SettingsModal";
@@ -19,7 +34,6 @@ import { DialogHost } from "@/components/Dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "@/lib/tauri-api";
 import { useViewerStore } from "@/stores/viewer";
-import { activeLibraryId } from "@/stores/library";
 
 export default function App() {
   const library = useLibraryStore();
@@ -71,6 +85,10 @@ export default function App() {
     // 降级到软件渲染。
     void api.uiReady();
 
+    // 先把「打开图库时是否自动补齐缩略图」的本地偏好推给后端，再恢复图库 ——
+    // 顺序反过来的话，用户明明关掉了预热，重启仍会被恢复流程先跑一整轮。
+    await ui.syncPrewarmToBackend();
+
     // Watchdog: force-clear loading after 3s even if restore hangs
     const watchdog = setTimeout(() => {
       library.setIsRestoring(false);
@@ -80,11 +98,13 @@ export default function App() {
     try {
       const saved = await api.restoreLibraries();
       library.setRestoredLibraries(saved.libraries);
-      
+
       if (saved.libraries.length === 1) {
         // Single library: auto-open it
         library.setLibraries(saved.libraries);
         library.setActiveLibraryId(saved.libraries[0].id);
+        files.loadFiles(0);
+        tags.loadTags();
       } else if (saved.libraries.length > 1) {
         // Multiple libraries: show picker
         library.setLibraries(saved.libraries);
@@ -97,9 +117,22 @@ export default function App() {
     library.setIsRestoring(false);
     clearTimeout(watchdog);
 
+    // window 上的 keydown 会有多个监听器（这里 + ImageViewer + ContextMenu）。同一次按键
+    // 里预览器先处理 Esc 并把自己关掉，等这里执行时 `viewer.viewerOpen()` 已经是 false ——
+    // 结果按一次 Esc 会「关预览 + 连带关掉右侧信息栏和搜索框」，用户得按两次。
+    // 捕获阶段的监听器一定早于所有冒泡监听器（与注册顺序无关），用它把「事件开始派发时」
+    // 的状态拍下来：只要当时有浮层开着（预览 / 右键菜单 / 确认弹窗），这次按键就归浮层，
+    // App 这一层不碰背景状态（否则剪贴板菜单按下 Esc 会顺手清掉选中项）。
+    let overlayWasOpen = false;
+    const snapshotOverlayState = () => {
+      overlayWasOpen =
+        viewer.viewerOpen() || ui.contextMenu() !== null || ui.dialog() !== null;
+    };
+    window.addEventListener("keydown", snapshotOverlayState, true);
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't handle app shortcuts when viewer is open (viewer handles its own keys)
-      if (viewer.viewerOpen()) return;
+      // Don't handle app shortcuts when an overlay is open (it handles its own keys)
+      if (overlayWasOpen) return;
       if (e.ctrlKey && e.key === "f") {
         e.preventDefault();
         ui.setShowSearch(true);
@@ -134,30 +167,27 @@ export default function App() {
         setDragOver(false);
         const paths = event.payload.paths;
         if (paths.length > 0 && !IMAGE_EXT.test(paths[0])) {
+          // 数据重载交给 activeLibraryId 的 effect，这里只负责开库。
           library.openLibrary(paths[0]);
         }
       }
     });
 
     onCleanup(() => {
+      window.removeEventListener("keydown", snapshotOverlayState, true);
       window.removeEventListener("keydown", handleKeyDown);
       unlisten();
     });
   });
 
-  const headerBg = "var(--bg-secondary)";
   const borderColor = "var(--border-color)";
 
   return (
-    <div class="flex flex-col h-full" style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}>
+    <div class="flex flex-col h-full" style={{ background: "var(--bg-primary)", "background-image": "var(--canvas-glow)", color: "var(--text-primary)" }}>
       {/* Title Bar */}
       <header class="app-header flex items-center gap-3 px-4 py-2">
         <div class="flex items-center gap-2">
-          <svg class="w-6 h-6" style={{ color: "var(--accent)" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <circle cx="9" cy="10" r="1.6" />
-            <path d="M3 17l5-5 4 4 3-3 6 6" />
-          </svg>
+          <HeroLogo size={22} style={{ color: "var(--text-primary)" }} />
           <span class="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>PixVault</span>
         </div>
 
@@ -173,14 +203,15 @@ export default function App() {
               <span class="font-medium max-w-[10rem] truncate" style={{ color: "var(--text-primary)" }}>
                 {library.activeLibrary()?.name}
               </span>
-              <span style={{ color: "var(--text-muted)" }}>▾</span>
+              <span style={{ color: "var(--text-muted)" }}>
+                <IconChevronDown size={12} />
+              </span>
             </button>
             <Show when={libMenuOpen()}>
               <>
                 {/* 透明遮罩：点空白处关闭下拉 */}
                 <div class="fixed inset-0 z-40" onClick={() => setLibMenuOpen(false)} />
-                <div class="absolute top-full left-0 mt-1 w-64 rounded-lg shadow-2xl z-50 py-1 animate-scale-in"
-                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border-color)" }}>
+                <div class="glass-modal absolute top-full left-0 mt-1 w-64 rounded-lg z-50 py-1 animate-scale-in">
                   <For each={library.libraries()}>
                     {(lib) => (
                       <button
@@ -191,7 +222,9 @@ export default function App() {
                           setLibMenuOpen(false);
                         }}
                       >
-                        <span>{lib.is_network ? "🌐" : "💻"}</span>
+                        <span class="flex-shrink-0" style={{ color: "var(--text-muted)" }}>
+                          {lib.is_network ? <IconGlobe size={14} /> : <IconLibrary size={14} />}
+                        </span>
                         <span class="truncate flex-1">{lib.name}</span>
                         <span class="text-2xs tabular-nums flex-shrink-0" style={{ color: "var(--text-muted)" }}>
                           {lib.file_count > 0 ? lib.file_count.toLocaleString() : ""}
@@ -204,11 +237,8 @@ export default function App() {
             </Show>
           </div>
           <Show when={library.nasStatus()}>
-            <span class="text-xs ml-1">
-              {library.nasStatus()?.status === "local" && "💻"}
-              {library.nasStatus()?.status === "online" && "🟢"}
-              {library.nasStatus()?.status === "degraded" && "🟡"}
-              {library.nasStatus()?.status === "offline" && "🔴"}
+            <span class="text-xs ml-1 flex items-center">
+              <StatusDot tone={library.nasStatus()!.status} />
             </span>
           </Show>
         </Show>
@@ -219,36 +249,36 @@ export default function App() {
 
         {/* Theme Toggle */}
         <button
-          class="btn-ghost text-xs px-2"
+          class="btn-ghost text-xs px-2 flex"
           onClick={theme.toggle}
           title={theme.theme() === "light" ? "切换到深色模式" : "切换到浅色模式"}
         >
-          {theme.theme() === "light" ? "🌙" : "☀️"}
+          {theme.theme() === "light" ? <IconMoon size={15} /> : <IconSun size={15} />}
         </button>
 
         <button
-          class="btn-ghost text-xs"
+          class="btn-ghost text-xs flex"
           onClick={() => ui.setSidebarOpen(!ui.sidebarOpen())}
           title={ui.sidebarOpen() ? "隐藏侧边栏" : "显示侧边栏"}
         >
-          {ui.sidebarOpen() ? "◀" : "▶"}
+          {ui.sidebarOpen() ? <IconChevronLeft size={15} /> : <IconChevronRight size={15} />}
         </button>
 
         <button
-          class="btn-ghost text-xs px-2"
+          class="btn-ghost text-xs px-2 flex"
           style={{ color: ui.infoPanelOpen() ? "var(--accent)" : "var(--text-muted)" }}
           onClick={toggleInfoPanel}
           title={ui.infoPanelOpen() ? "隐藏信息面板" : "显示信息面板"}
         >
-          ▥
+          <IconPanelRight size={15} />
         </button>
 
         <button
-          class="btn-ghost text-xs px-2"
+          class="btn-ghost text-xs px-2 flex"
           onClick={() => ui.setShowSettings(true)}
           title="设置"
         >
-          ⚙
+          <IconSettings size={15} />
         </button>
       </header>
 
@@ -259,7 +289,9 @@ export default function App() {
         <Show when={!library.isRestoring()} fallback={
           <div class="flex-1 flex items-center justify-center" style={{ background: "var(--bg-primary)" }}>
             <div class="text-center">
-              <div class="text-3xl mb-3">⏳</div>
+              <div class="mb-3 flex justify-center" style={{ color: "var(--text-muted)" }}>
+                <IconLoader size={30} class="animate-spin" />
+              </div>
               <p class="text-sm" style={{ color: "var(--text-muted)" }}>正在加载...</p>
             </div>
           </div>
@@ -293,7 +325,9 @@ export default function App() {
       <Show when={dragOver()}>
         <div class="drop-zone">
           <div class="text-center">
-            <div class="text-4xl mb-3">📁</div>
+            <div class="mb-3 flex justify-center" style={{ color: "var(--text-primary)" }}>
+              <IconFolder size={44} />
+            </div>
             <p class="text-lg font-medium" style={{ color: "var(--text-primary)" }}>拖放文件夹以打开图片库</p>
             <p class="text-sm mt-1" style={{ color: "var(--text-muted)" }}>支持本地文件夹和网络路径 (SMB)</p>
           </div>
@@ -328,23 +362,32 @@ export default function App() {
 
       {/* Library picker dialog (multiple libraries available) */}
       <Show when={library.showLibraryPicker()}>
-        <div class="fixed inset-0 z-40 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.5)" }}>
-          <div class="rounded-xl p-6 w-96 shadow-2xl animate-scale-in" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border-color)" }}>
+        <div class="modal-overlay fixed inset-0 z-40 flex items-center justify-center">
+          <div class="glass-modal rounded-xl p-6 w-96 animate-scale-in">
             <h2 class="text-lg font-semibold mb-4 text-center" style={{ color: "var(--text-primary)" }}>选择要打开的库</h2>
             <div class="flex flex-col gap-2 mb-4 max-h-60 overflow-y-auto">
               {library.restoredLibraries().map((lib) => (
                 <button
                   class="text-left px-4 py-3 rounded-lg transition-colors w-full"
                   style={{ background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
-              onClick={() => {
-                library.setActiveLibraryId(lib.id);
-                library.setShowLibraryPicker(false);
-              }}
+                  onClick={() => {
+                    library.setActiveLibraryId(lib.id);
+                    library.setShowLibraryPicker(false);
+                    files.loadFiles(0);
+                    tags.loadTags();
+                  }}
                 >
-                  <div class="text-sm font-medium truncate">{lib.name}</div>
-                  <div class="text-2xs mt-0.5 truncate" style={{ color: "var(--text-muted)" }}>
-                    {lib.is_network ? "🌐 " : "💻 "}{lib.root_path} · {lib.file_count} 个文件
-                  </div>
+                  <span class="flex items-center gap-2.5">
+                    <span class="flex-shrink-0" style={{ color: "var(--text-muted)" }}>
+                      {lib.is_network ? <IconGlobe size={16} /> : <IconLibrary size={16} />}
+                    </span>
+                    <span class="flex-1 min-w-0">
+                      <span class="block text-sm font-medium truncate">{lib.name}</span>
+                      <span class="block text-2xs truncate" style={{ color: "var(--text-muted)" }}>
+                        {lib.root_path} · {lib.file_count} 个文件
+                      </span>
+                    </span>
+                  </span>
                 </button>
               ))}
             </div>

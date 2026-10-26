@@ -56,10 +56,51 @@
 
 ### 其他
 - 缩略图双档：网格 448px（整库后台预热）+ 预览 1600px（按需生成），解码绝不持锁
+- **真虚拟化网格**：只挂可见 ±2 行的卡片，10 万张也能即时滚动；32px LQIP 占位图先于真图到达，铺底淡入不白屏
+- **后台预热 + 侧栏进度环**：导入 / 打开库后自动补齐缺失缩略图，资源库区实时显示本轮进度；可在设置里关闭预热
+- **交互感知节流**：滚动 / 拖拽时后端暂停 bulk 队列只 urgent，界面更跟手；进程与解码线程均降优先级，不让风扇抢戏
+- **渲染方式（GPU）开关**：设置页可选 自动 / 硬件加速 / 软件渲染，WebView2 崩溃后自动降级并持久化，不再白屏
+- Fluent 玻璃拟态界面（侧栏 / 标题栏 / 弹层真高斯模糊，卡片用伪玻璃兼顾性能）、黑白双主题、全套自绘线性图标
 - 套索框选、框选后拖拽到回收站、拖出窗口交给 OS（可丢进 QQ / 微信 / 资源管理器）
 - 全文搜索（FTS5 + LIKE 兜底）、重复文件查找
 - 导入 Eagle / Pixcall 库（设置面板）
 - 深浅双主题、网格 / 瀑布流 / 列表三种视图、缩略图尺寸滑杆
+
+---
+
+## 几个容易被忽略的交互细节
+
+这些都是「用着别扭但说不清哪不对」的那类问题，改法与原因一并记下来。
+
+### 点开信息面板后，那张图为什么还钉在原位
+
+信息面板是固定宽的兄弟节点（`w-[19rem]`），一开一关网格宽度就变，列数跟着变 —— 同一张图换了行。点击时它明明在眼前，面板一开列数变少，它被推到更靠后的行，于是滑出可视区，用户感觉「点了就跳走了」，还得自己找回来。
+
+列数变化只改行号、不改行高，所以把 `scrollTop` 平移「行差 × 行高」就能让它留在原来的纵向位置（不是「滚到它可见」，而是逐像素不动）。三个坑：
+
+1. **用 `requestAnimationFrame` 而不是微任务** —— rAF 一定在 DOM 更新之后、本帧绘制之前。此刻 `clientWidth` 已经是新宽度，而 `virtual()` 里的列数还是旧的（ResizeObserver 要等本帧 rAF 回调之后才派发），正好一旧一新可以对比；用户也不会看到「先跳到别处再跳回来」的闪烁。
+2. **先记旧 `scrollTop` 再让新宽度进信号** —— 列数一变，撑起滚动高度的行数也跟着变，浏览器可能趁机把 `scrollTop` 夹一下；用绝对目标值（旧位置 + 行差）算才稳，不能累加。
+3. **平移后立刻 `syncViewport()`** —— 否则切片还按旧位置算，会闪一帧空白。
+
+关面板时 `onClose` 会先把 `infoPanelFile` 清空，所以另存一个 `anchorPath` 当锚点（Esc 那条路径不清空，只有 X 按钮清）。瀑布流没有虚拟化（CSS columns 列高不均算不出行位置），那里退回用元素实测矩形兜底。
+
+### 一个 Esc 为什么关了三样东西
+
+`window` 上有多个 `keydown` 监听器：`App.tsx`（全局快捷键）、`ImageViewer.tsx`（Esc / ←→）、`ContextMenu.tsx`（Esc 收菜单）、`Dialog.tsx`（Esc 关弹窗）。**同一事件里它们按注册顺序执行，后面的会读到被前面改过的状态。**
+
+原写法 `if (viewer.viewerOpen()) return;` —— 预览器先把自己关掉（`viewerOpen` → false），App 的守卫就不成立了，于是 Esc 一次同时关掉预览 + 右侧信息栏 + 搜索框。
+
+修法是**捕获阶段的快照**：捕获阶段监听器一定早于所有冒泡监听器（与注册顺序无关），用它把「事件开始派发时」的浮层状态存成 `overlayWasOpen`，后续判断全用快照。语义统一为「**Esc 只关最上面那一层**」，浮层集合 = 预览 / 右键菜单 / 确认弹窗；搜索框不算浮层（Esc 关它是 App 那层的职责）。
+
+不要试图用 `stopPropagation` 拦 —— 同为目标 `window` 的两个监听器互相拦不住（只有 `stopImmediatePropagation` 能拦，且依赖注册顺序）。
+
+弹窗的 Esc 挂在 `window` 上而不是弹层 `div` 上：只有带输入框的弹窗才有焦点可落，纯确认弹窗打开时焦点还在 `body`，`div` 收不到 `keydown`。
+
+### 侧栏的缩进基线是 18px
+
+`.sidebar-section` 用 `px-2`（8px），`.sidebar-item` / `.sidebar-title` 再叠 `px-2.5`（10px），内容统一落在 **18px**。别再给 section 和 item 各写一层 `px-3` —— 两层叠加跑到 24px，而分组标题 12px、回收站 20px，三条缩进线各走各的，看着就是「没对齐但说不上哪歪」。颜色色板、空状态提示、「新建标签」输入框都跟着这条基线走。
+
+资源库条目的图标是 `IconLibrary`（照片堆叠 + 山与太阳），不要退回 `IconMonitor` —— 显示器会被读成「屏幕 / 远程」，和「一个放图片的文件夹」没关系。
 
 ---
 
@@ -69,8 +110,9 @@
 ┌──────────────────────────────────────────────────────────────┐
 │ 前端 SolidJS（src/）                                          │
 │  App.tsx            布局 + 当前库切换 + 切库重载 effect        │
-│  components/        Sidebar(分区侧边栏) ThumbnailGrid         │
-│                    ThumbnailCard InfoPanel ContextMenu …     │
+│  components/        Sidebar(分区侧边栏+进度环) ThumbnailGrid   │
+│                    (真虚拟化) ThumbnailCard(LQIP 占位)        │
+│                    InfoPanel ContextMenu CircleProgress …     │
 │  stores/            files(视图状态机) library tags ui viewer  │
 │  lib/tauri-api.ts   invoke 封装 + 类型 + mock                 │
 ├──────────────────────────────────────────────────────────────┤
@@ -82,11 +124,13 @@
 │                      FileFilter 组合过滤（文件夹/收藏/颜色/评分）│
 │                      get_folder_tree 内存聚合目录树            │
 │  engine/indexer.rs  目录扫描（跳过 .pixvault）+ 头部解析尺寸    │
-│  engine/thumbs.rs   缩略图 worker 池（rayon， urgent/bulk）    │
-│  engine/thumbnail.rs 448/1600 双档 + 缓存版本哨兵              │
+│  engine/thumbs.rs   缩略图 worker 池（rayon， urgent/bulk + 视口窗口降级）│
+│  engine/thumbnail.rs 448/1600 双档 + 32px LQIP + 缓存版本哨兵        │
 │  engine/import.rs   Eagle / Pixcall 库导入                    │
 │  commands/          library files tags search import          │
+│  gpu.rs             GPU 崩溃哨兵 + 渲染模式开关（窗口在此创建）    │
 │  utils/winattr.rs   Windows 上给 .pixvault 打隐藏属性          │
+│  utils/priority.rs  进程 / 解码线程降优先级（后台任务让路）      │
 ├──────────────────────────────────────────────────────────────┤
 │ 存储                                                            │
 │  <库根>/.pixvault/db.sqlite     每库一个 SQLite（WAL）         │

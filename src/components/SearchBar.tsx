@@ -2,6 +2,7 @@ import { createSignal, Show, onCleanup } from "solid-js";
 import { useFilesStore } from "@/stores/files";
 import { api } from "@/lib/tauri-api";
 import { activeLibraryId } from "@/stores/library";
+import { IconClose, IconSearch } from "@/components/icons";
 
 export function SearchBar() {
   const files = useFilesStore();
@@ -54,10 +55,14 @@ export function SearchBar() {
         <input ref={inputRef} class="input text-xs w-56 py-1 pl-7 pr-8" placeholder="搜索文件... (Ctrl+F)"
           value={query()} onInput={(e) => handleInput(e.currentTarget.value)}
           onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); if (e.key === "Escape") { setQuery(""); setResults(null); files.loadFiles(0); } }} />
-        <span class="absolute left-2 top-1/2 -translate-y-1/2 text-xs" style={{ color: s.muted }}>🔍</span>
+        <span class="absolute left-2 top-1/2 -translate-y-1/2 flex" style={{ color: s.muted }}>
+          <IconSearch size={13} />
+        </span>
         <Show when={query()}>
-          <button class="absolute right-1 top-1/2 -translate-y-1/2 text-xs" style={{ color: s.muted }}
-            onClick={() => { setQuery(""); setResults(null); files.loadFiles(0); inputRef.focus(); }}>✕</button>
+          <button class="absolute right-1 top-1/2 -translate-y-1/2 flex p-0.5" style={{ color: s.muted }}
+            onClick={() => { setQuery(""); setResults(null); files.loadFiles(0); inputRef.focus(); }}>
+            <IconClose size={12} />
+          </button>
         </Show>
       </div>
       <Show when={results() !== null}>

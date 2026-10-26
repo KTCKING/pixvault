@@ -1,4 +1,4 @@
-import { Show, For, createSignal, createEffect } from "solid-js";
+import { Show, For, createSignal, createEffect, on, onCleanup } from "solid-js";
 import { useUIStore } from "@/stores/ui";
 
 /**
@@ -14,6 +14,19 @@ export function DialogHost() {
     const d = ui.dialog();
     if (d) setValue(d.input?.defaultValue ?? "");
   });
+
+  // Esc 关闭本层。挂在 window 上而不是弹层 div 上 —— 只有带输入框的弹窗才有
+  // 焦点可落，纯确认弹窗打开时焦点还在 body，div 收不到 keydown。
+  // App 那一层用捕获阶段快照判断「事件开始时浮层已打开」，所以这里关掉之后
+  // 不会连带清空背景的选中项。
+  createEffect(on(() => ui.dialog(), (d) => {
+    if (!d) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); ui.closeDialog(); }
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  }));
 
   const run = async (fn: (v: string) => void | Promise<void>) => {
     const v = value();
@@ -37,8 +50,8 @@ export function DialogHost() {
             onContextMenu={(e) => e.preventDefault()}
           >
             <div
-              class="rounded-xl p-5 shadow-2xl animate-scale-in"
-              style={{ background: "var(--bg-secondary)", border: "1px solid var(--border-color)", width: "360px" }}
+              class="glass-modal rounded-xl p-5 animate-scale-in"
+              style={{ width: "360px" }}
               onClick={(e) => e.stopPropagation()}
             >
               <Show when={s().title}>

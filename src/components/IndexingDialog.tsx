@@ -1,5 +1,6 @@
 import { Show } from "solid-js";
 import { useLibraryStore, type IndexProgress } from "@/stores/library";
+import { IconCheckCircle, IconSearch } from "@/components/icons";
 
 export function IndexingDialog() {
   const library = useLibraryStore();
@@ -14,10 +15,12 @@ export function IndexingDialog() {
   return (
     <>
       <Show when={library.isIndexing() && progress()}>
-        <div class="fixed inset-0 z-40 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.5)" }}>
-          <div class="rounded-xl p-8 w-96 shadow-2xl animate-scale-in" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border-color)" }}>
+        <div class="modal-overlay fixed inset-0 z-40 flex items-center justify-center">
+          <div class="glass-modal rounded-xl p-8 w-96 animate-scale-in">
             <div class="text-center mb-4">
-              <div class="text-3xl mb-2">🔍</div>
+            <div class="mb-3 flex justify-center" style={{ color: "var(--text-muted)" }}>
+              <IconSearch size={30} />
+            </div>
               <h2 class="text-lg font-semibold" style={{ color: "var(--text-primary)" }}>正在索引文件</h2>
               <p class="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
                 {progress()?.processed ?? 0} / {progress()?.total ?? 0} 个文件
@@ -42,9 +45,11 @@ export function IndexingDialog() {
       </Show>
 
       <Show when={library.indexComplete()}>
-        <div class="fixed inset-0 z-40 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.5)" }}>
-          <div class="rounded-xl p-8 w-96 shadow-2xl animate-scale-in text-center" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border-color)" }}>
-            <div class="text-4xl mb-3">✅</div>
+        <div class="modal-overlay fixed inset-0 z-40 flex items-center justify-center">
+          <div class="glass-modal rounded-xl p-8 w-96 animate-scale-in text-center">
+            <div class="mb-3 flex justify-center" style={{ color: "var(--accent)" }}>
+              <IconCheckCircle size={34} />
+            </div>
             <h2 class="text-lg font-semibold mb-1" style={{ color: "var(--text-primary)" }}>导入完成</h2>
             <p class="text-sm mb-6" style={{ color: "var(--text-muted)" }}>
               已成功索引 {progress()?.total ?? 0} 个文件

@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for PrismVault",
+  "description": "Default capabilities for PixVault",
   "windows": ["main"],
   "permissions": [
     "core:default",

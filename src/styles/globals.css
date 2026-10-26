@@ -2,45 +2,78 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── Theme Variables ──────────────────────────── */
+/* ── Theme Variables ────────────────────────────
+   黑白两套主题，Fluent 玻璃拟态：画布为纯黑/纯白，表面层用半透明 + 高斯模糊
+   叠出层次，描边用同色微光（白底用黑 alpha、黑底用白 alpha）替代硬边框。 */
 :root {
-  --bg-primary: #ffffff;
-  --bg-secondary: #f8f9fa;
-  --bg-tertiary: #f1f3f5;
-  --bg-hover: #e9ecef;
-  --border-color: #dee2e6;
-  --border-light: #e9ecef;
-  --text-primary: #212529;
-  --text-secondary: #495057;
-  --text-muted: #868e96;
+  /* 画布 */
+  --bg-primary: #f4f4f5;
+  --bg-secondary: rgba(255, 255, 255, 0.62);
+  --bg-tertiary: rgba(255, 255, 255, 0.50);
+  --bg-hover: rgba(0, 0, 0, 0.06);
+  --bg-elevated: rgba(255, 255, 255, 0.78);
+  /* 画布微光：极淡的径向渐变，让玻璃模糊有内容可透，同时保持黑白纯净 */
+  --canvas-glow: radial-gradient(1200px 800px at 80% -10%, rgba(0, 0, 0, 0.05), transparent 60%),
+                 radial-gradient(1000px 700px at -10% 110%, rgba(0, 0, 0, 0.04), transparent 60%);
+
+  /* 描边 / 高光 */
+  --border-color: rgba(0, 0, 0, 0.10);
+  --border-light: rgba(0, 0, 0, 0.06);
+  --glass-stroke: rgba(0, 0, 0, 0.08);
+  --glass-highlight: rgba(255, 255, 255, 0.7);
+
+  /* 文字 */
+  --text-primary: #111113;
+  --text-secondary: #3f3f46;
+  --text-muted: #71717a;
   --text-inverse: #ffffff;
-  --accent: #4c6ef5;
-  --accent-hover: #4263eb;
-  --accent-bg: #edf2ff;
-  --danger: #e03131;
-  --star-color: #f59f00;
-  --shadow: 0 1px 3px rgba(0,0,0,0.08);
-  --shadow-lg: 0 4px 12px rgba(0,0,0,0.1);
+
+  /* 强调（黑白主题下用近黑作主色，暖橙只作激活点缀） */
+  --accent: #18181b;
+  --accent-hover: #27272a;
+  --accent-bg: rgba(0, 0, 0, 0.07);
+  --accent-contrast: #ffffff;
+  --accent-warm: #f97316;
+  --accent-warm-bg: rgba(249, 115, 22, 0.12);
+
+  --danger: #dc2626;
+  --star-color: #f59e0b;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.10);
 }
 
 .dark {
-  --bg-primary: #0d1117;
-  --bg-secondary: #161b22;
-  --bg-tertiary: #21262d;
-  --bg-hover: #30363d;
-  --border-color: #30363d;
-  --border-light: #21262d;
-  --text-primary: #e6edf3;
-  --text-secondary: #c9d1d9;
-  --text-muted: #8b949e;
-  --text-inverse: #0d1117;
-  --accent: #5c7cfa;
-  --accent-hover: #748ffc;
-  --accent-bg: #1a2332;
-  --danger: #ff6b6b;
-  --star-color: #fcc419;
-  --shadow: 0 1px 3px rgba(0,0,0,0.3);
-  --shadow-lg: 0 4px 12px rgba(0,0,0,0.4);
+  --bg-primary: #0a0a0b;
+  --bg-secondary: rgba(28, 28, 32, 0.62);
+  --bg-tertiary: rgba(34, 34, 38, 0.50);
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-elevated: rgba(32, 32, 36, 0.78);
+  --canvas-glow: radial-gradient(1200px 800px at 80% -10%, rgba(255, 255, 255, 0.05), transparent 60%),
+                 radial-gradient(1000px 700px at -10% 110%, rgba(255, 255, 255, 0.04), transparent 60%);
+
+  --border-color: rgba(255, 255, 255, 0.10);
+  --border-light: rgba(255, 255, 255, 0.06);
+  --glass-stroke: rgba(255, 255, 255, 0.08);
+  --glass-highlight: rgba(255, 255, 255, 0.16);
+
+  --text-primary: #f4f4f5;
+  --text-secondary: #d4d4d8;
+  --text-muted: #8e8e94;
+  --text-inverse: #0a0a0b;
+
+  --accent: #f4f4f5;
+  --accent-hover: #ffffff;
+  --accent-bg: rgba(255, 255, 255, 0.10);
+  --accent-contrast: #0a0a0b;
+  --accent-warm: #fb923c;
+  --accent-warm-bg: rgba(251, 146, 60, 0.14);
+
+  --danger: #f87171;
+  --star-color: #fbbf24;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 
 /* ── Base ─────────────────────────────────────── */
@@ -65,6 +98,33 @@
     background: var(--bg-primary);
     color: var(--text-primary);
     transition: background-color 0.2s, color 0.2s;
+  }
+
+  /* 玻璃表面：半透明 + 高斯模糊 + 同色微光描边。真 backdrop-filter 用在侧栏 /
+     标题栏 / 弹层这些数量固定的表面；缩略图卡片走「伪玻璃」（见 .thumbnail-card），
+     避免软件渲染下几十张卡片同时 blur 掉帧。 */
+  .glass {
+    background: var(--bg-secondary);
+    backdrop-filter: blur(24px) saturate(1.4);
+    -webkit-backdrop-filter: blur(24px) saturate(1.4);
+    border: 1px solid var(--glass-stroke);
+  }
+
+  /* 模态弹层专用：不透明度更高的玻璃（下面还有遮罩 + 页面内容，
+     用 --bg-secondary 会把底层文字透出来 —— 库选择弹窗踩过这个坑）。
+     遮罩本身也应配 backdrop-filter: blur(6px) 把底页糊掉。 */
+  .glass-modal {
+    background: var(--bg-elevated);
+    backdrop-filter: blur(28px) saturate(1.5);
+    -webkit-backdrop-filter: blur(28px) saturate(1.5);
+    border: 1px solid var(--glass-stroke);
+    box-shadow: var(--shadow-lg), inset 0 1px 0 var(--glass-highlight);
+  }
+
+  .modal-overlay {
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
   }
 
   ::-webkit-scrollbar {
@@ -97,7 +157,7 @@
 
   .btn-primary {
     background: var(--accent);
-    color: white;
+    color: var(--accent-contrast);
     border: 1px solid var(--accent);
   }
   .btn-primary:hover {
@@ -125,7 +185,7 @@
 
   .btn-danger {
     background: var(--danger);
-    color: white;
+    color: #fff;
     border: 1px solid var(--danger);
     opacity: 0.85;
   }
@@ -152,25 +212,38 @@
 
 /* ── Thumbnail Grid ───────────────────────────── */
 .thumbnail-card {
-  @apply relative rounded-lg overflow-hidden cursor-pointer
+  @apply relative overflow-hidden cursor-pointer
          transition-all duration-100;
+  border-radius: 9px;
+  /* 「伪玻璃」：半透明实色、不做 backdrop-filter。卡片数量不固定（虚拟化后仍有
+     几十张同屏），真 blur 在软件渲染下会掉帧；半透明叠在纯色画布上视觉上已足够
+     分出层次。 */
   background: var(--bg-secondary);
-  border: 2px solid transparent;
+  border: 1px solid var(--glass-stroke);
   box-shadow: var(--shadow);
-  /* 2400 张图全在 DOM 里时，让浏览器跳过视口外卡片的样式/布局/绘制。
-     卡片高度是显式写死的（size+40px），所以容器高度不受影响，
-     套索选择用的 getBoundingClientRect 也依然准确。 */
+  /* 网格 / 列表模式已经做了真虚拟化（DOM 里只剩可见的几十张），这里是双保险：
+     瀑布流模式没有虚拟化，浏览器仍会跳过视口外卡片的样式 / 布局 / 绘制。
+     卡片高度是显式写死的（size+40px），所以容器高度不受影响。 */
   content-visibility: auto;
   contain-intrinsic-size: auto 300px;
 }
 .thumbnail-card:hover {
-  border-color: var(--accent);
+  border-color: var(--glass-highlight);
   box-shadow: var(--shadow-lg);
+  transform: translateY(-1px);
 }
 .thumbnail-card.selected {
-  border-color: var(--accent);
-  background: var(--accent-bg);
+  border-color: var(--accent-warm);
+  background: var(--bg-elevated);
+  box-shadow: 0 0 0 1px var(--accent-warm), var(--shadow-lg);
 }
+
+/* 占位图（LQIP）原来在这里有一条 `.lqip { filter: blur(10px); transform: scale(1.08) }`，
+   现已删除。原因：32px 的小图被 object-cover 拉满整格，本身已经糊到看不出像素块，
+   再叠一层 10px 高斯模糊只是给每张卡片白烧一次 CPU —— 几百张卡片同时挂载时，
+   在软件渲染（GPU 被降级）下滚动会明显掉帧。而 transform: scale(1.08) 的唯一
+   用途是遮住模糊产生的半透明边缘，没有模糊就不需要它，去掉反而少一个要重新
+   光栅化的合成层。占位图现在就是「原样放大 + 真图淡入覆盖」。 */
 .thumbnail-card:hover .thumbnail-actions {
   @apply opacity-100;
 }
@@ -200,12 +273,26 @@
 }
 
 /* ── Sidebar ──────────────────────────────────── */
+.app-sidebar {
+  background: var(--bg-secondary);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  border-right: 1px solid var(--border-color);
+}
+
 .sidebar-section {
-  @apply px-3 py-2;
+  @apply px-2 py-1.5;
+}
+
+/* 分组标题与 item 内容共用同一条左边线（18px）：item 自带 px-2.5，
+   标题补上同样的内边距。以前是「section px-3 + item px-3」两层叠加，
+   标题在 12px、内容在 24px，看着是两套缩进。 */
+.sidebar-title {
+  @apply px-2.5;
 }
 
 .sidebar-item {
-  @apply flex items-center gap-2 px-3 py-1.5 rounded-md text-sm
+  @apply flex items-center gap-2 px-2.5 py-1.5 rounded-md text-sm
          cursor-pointer transition-colors;
   color: var(--text-secondary);
 }
@@ -215,7 +302,26 @@
 }
 .sidebar-item.active {
   background: var(--accent-bg);
-  color: var(--accent);
+  color: var(--text-primary);
+}
+
+/* 侧栏顶部导航 tab：四等宽胶囊，激活态是「实心强调色 + 反色图标」——
+   和 .btn-primary 同一套语言，比贴底 2px 下划线离图标近、指示也更明确。
+   （浅色主题下 --bg-elevated 是"白叠白"，只有 2 个色阶差，当激活态太虚。） */
+.sidebar-tab {
+  @apply flex-1 flex items-center justify-center rounded-lg transition-colors;
+  height: 32px;
+  color: var(--text-muted);
+}
+.sidebar-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+.sidebar-tab.active,
+.sidebar-tab.active:hover {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  box-shadow: var(--shadow);
 }
 
 /* ── Virtual Scroll Container ─────────────────── */
@@ -228,6 +334,8 @@
 .status-bar {
   @apply flex items-center gap-3 px-4 py-1 text-2xs;
   background: var(--bg-secondary);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
   color: var(--text-muted);
   border-top: 1px solid var(--border-color);
 }
@@ -241,9 +349,12 @@
 
 /* ── Context Menu ─────────────────────────────── */
 .context-menu {
-  @apply absolute z-50 min-w-[180px] py-1 rounded-lg shadow-2xl;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  @apply absolute z-50 min-w-[180px] py-1 rounded-xl shadow-2xl;
+  background: var(--bg-elevated);
+  backdrop-filter: blur(28px) saturate(1.5);
+  -webkit-backdrop-filter: blur(28px) saturate(1.5);
+  border: 1px solid var(--glass-stroke);
+  box-shadow: var(--shadow-lg), inset 0 1px 0 var(--glass-highlight);
 }
 
 .context-menu-item {
@@ -265,12 +376,16 @@
 /* ── Header ───────────────────────────────────── */
 .app-header {
   background: var(--bg-secondary);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
   border-bottom: 1px solid var(--border-color);
 }
 
 /* ── Info Panel ───────────────────────────────── */
 .info-panel {
   background: var(--bg-secondary);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
   border-left: 1px solid var(--border-color);
 }
 

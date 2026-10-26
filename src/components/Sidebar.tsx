@@ -1,21 +1,37 @@
 import { For, Show, createSignal, onCleanup } from "solid-js";
-import { useLibraryStore } from "@/stores/library";
+import type { JSX } from "solid-js";
+import { useLibraryStore, warmForLibrary } from "@/stores/library";
 import { useFilesStore } from "@/stores/files";
 import { useTagsStore } from "@/stores/tags";
 import { useUIStore } from "@/stores/ui";
 import { COLOR_LABELS, type FolderNode, type Tag } from "@/lib/tauri-api";
+import { CircleProgress } from "./CircleProgress";
 import { open } from "@tauri-apps/plugin-dialog";
+import {
+  IconCheck,
+  IconChevronRight,
+  IconClock,
+  IconClose,
+  IconFolder,
+  IconGlobe,
+  IconHeart,
+  IconImage,
+  IconLibrary,
+  IconPlus,
+  IconStarFilled,
+  IconTrash,
+} from "@/components/icons";
 
-/** 侧边栏分区标题。 */
-function SectionHeader(props: { title: string; action?: { icon: string; title: string; onClick: () => void } }) {
+/** 侧边栏分区标题。action 的 icon 传 JSX（图标系统统一收口）。 */
+function SectionHeader(props: { title: string; action?: { icon: JSX.Element; title: string; onClick: () => void } }) {
   return (
-    <div class="flex items-center justify-between px-3 pt-3 pb-1">
-      <span class="text-2xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
+    <div class="sidebar-section flex items-center justify-between">
+      <span class="sidebar-title text-2xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
         {props.title}
       </span>
       <Show when={props.action}>
         {(a) => (
-          <button class="text-xs px-1 rounded hover:bg-[var(--bg-hover)] transition-colors"
+          <button class="flex p-0.5 rounded hover:bg-[var(--bg-hover)] transition-colors"
             style={{ color: "var(--text-muted)" }} title={a().title} onClick={a().onClick}>
             {a().icon}
           </button>
@@ -28,7 +44,7 @@ function SectionHeader(props: { title: string; action?: { icon: string; title: s
 /** 一条侧边栏条目（视图 / 文件夹 / 标签共用）。 */
 function NavItem(props: {
   active: boolean;
-  icon?: string;
+  icon?: JSX.Element;
   label: string;
   count?: number;
   depth?: number;
@@ -47,9 +63,10 @@ function NavItem(props: {
       classList={{ active: props.active }}
       data-lib-index={props.libIndex}
       style={{
-        "padding-left": `${12 + (props.depth ?? 0) * 14}px`,
+        // 与 .sidebar-item 自带 px-2.5（10px）对齐；树形每层 +14px。
+        "padding-left": `${10 + (props.depth ?? 0) * 14}px`,
         ...(props.dropTarget
-          ? { background: "var(--accent)", color: "#fff", outline: "2px dashed var(--accent)", "outline-offset": "2px" }
+          ? { background: "var(--accent)", color: "var(--accent-contrast)", outline: "2px dashed var(--accent)", "outline-offset": "2px" }
           : {}),
       }}
       title={props.title ?? props.label}
@@ -63,24 +80,26 @@ function NavItem(props: {
       }}
     >
       <Show when={props.icon}>
-        <span class="text-xs flex-shrink-0">{props.icon}</span>
+        <span class="flex-shrink-0 flex" style={{ color: props.dropTarget ? "var(--accent-contrast)" : "var(--text-muted)" }}>
+          {props.icon}
+        </span>
       </Show>
       <span class="truncate flex-1">{props.label}</span>
       <Show when={props.count !== undefined && props.count > 0}>
-        <span class="text-2xs tabular-nums flex-shrink-0" style={{ color: props.dropTarget ? "#fff" : "var(--text-muted)" }}>
+        <span class="text-2xs tabular-nums flex-shrink-0" style={{ color: props.dropTarget ? "var(--accent-contrast)" : "var(--text-muted)" }}>
           {props.count!.toLocaleString()}
         </span>
       </Show>
       <Show when={props.trailing}>
         <button
-          class="ml-1 px-1 text-xs rounded hover:bg-red-500/20 transition-colors flex-shrink-0"
-          style={{ color: props.dropTarget ? "#fff" : "var(--text-muted)" }}
+          class="ml-1 p-0.5 rounded hover:bg-red-500/20 transition-colors flex-shrink-0 flex"
+          style={{ color: props.dropTarget ? "var(--accent-contrast)" : "var(--text-muted)" }}
           onClick={(e) => {
             e.stopPropagation();
             props.trailing!();
           }}
         >
-          ✕
+          <IconClose size={12} />
         </button>
       </Show>
     </div>
@@ -103,12 +122,12 @@ function FolderItem(props: {
       <div
         class="sidebar-item"
         classList={{ active: props.activePath === props.node.path }}
-        style={{ "padding-left": `${12 + props.depth * 14}px` }}
+        style={{ "padding-left": `${10 + props.depth * 14}px` }}
         title={`${props.node.path} · ${props.node.file_count} 张`}
         onClick={() => props.onSelect(props.node.path)}
       >
         <button
-          class="w-3 text-2xs flex-shrink-0 transition-transform"
+          class="flex-shrink-0 flex transition-transform"
           style={{
             color: "var(--text-muted)",
             transform: isOpen() ? "rotate(90deg)" : "none",
@@ -119,9 +138,11 @@ function FolderItem(props: {
             props.toggle(props.node.path);
           }}
         >
-          ▶
+          <IconChevronRight size={12} />
         </button>
-        <span class="text-xs flex-shrink-0">📁</span>
+        <span class="flex-shrink-0 flex" style={{ color: "var(--text-muted)" }}>
+          <IconFolder size={14} />
+        </span>
         <span class="truncate flex-1">{props.node.name}</span>
         <Show when={props.node.file_count > 0}>
           <span class="text-2xs tabular-nums flex-shrink-0" style={{ color: "var(--text-muted)" }}>
@@ -156,7 +177,7 @@ function TagItem(props: {
       <div
         class="sidebar-item"
         classList={{ active: props.activeId === props.tag.id }}
-        style={{ "padding-left": `${12 + props.depth * 14}px` }}
+        style={{ "padding-left": `${10 + props.depth * 14}px` }}
         title={props.tag.name}
         onClick={() => props.onSelect(props.tag.id)}
       >
@@ -284,8 +305,7 @@ export function Sidebar() {
   const rootTags = () => tagChildMap().get(null) ?? [];
 
   return (
-    <aside class="w-56 flex-shrink-0 flex flex-col overflow-hidden"
-      style={{ background: "var(--bg-secondary)", borderRight: "1px solid var(--border-color)" }}
+    <aside class="app-sidebar w-56 flex-shrink-0 flex flex-col overflow-hidden"
       onContextMenu={(e) => {
         // Right-click on empty sidebar space opens the "new / open library" menu.
         e.preventDefault();
@@ -300,15 +320,15 @@ export function Sidebar() {
         {/* ── 智能视图 ─────────────────────────────── */}
         <SectionHeader title="智能视图" />
         <div class="px-2 flex flex-col gap-0.5">
-          <NavItem icon="🖼" label="所有图片" count={files.viewCounts()?.all}
+          <NavItem icon={<IconImage size={14} />} label="所有图片" count={files.viewCounts()?.all}
             active={isView("all")} onClick={() => files.setView({ kind: "all" })} />
-          <NavItem icon="🕘" label="最近新增"
+          <NavItem icon={<IconClock size={14} />} label="最近新增"
             active={isView("recent")} onClick={() => files.setView({ kind: "recent" })} />
-          <NavItem icon="♥" label="收藏" count={files.viewCounts()?.favorite}
+          <NavItem icon={<IconHeart size={14} />} label="收藏" count={files.viewCounts()?.favorite}
             active={isView("favorite")} onClick={() => files.setView({ kind: "favorite" })} />
-          <NavItem icon="★" label="已评分" count={files.viewCounts()?.rated}
+          <NavItem icon={<IconStarFilled size={14} />} label="已评分" count={files.viewCounts()?.rated}
             active={isView("rated")} onClick={() => files.setView({ kind: "rated" })} />
-          <NavItem icon="🗑" label="回收站" count={files.viewCounts()?.trash}
+          <NavItem icon={<IconTrash size={14} />} label="回收站" count={files.viewCounts()?.trash}
             active={isView("trash")} dropTarget={trashActive()}
             title={trashActive() ? "松开以移入回收站" : "回收站：把图片拖到此处删除"}
             onClick={() => files.setView({ kind: "trash" })}
@@ -325,7 +345,7 @@ export function Sidebar() {
 
         {/* ── 颜色标记 ─────────────────────────────── */}
         <SectionHeader title="颜色标记" />
-        <div class="px-3 pb-1 flex flex-wrap gap-1.5">
+        <div class="px-2.5 pb-1 flex flex-wrap gap-1.5">
           <For each={COLOR_LABELS}>
             {(c) => {
               const n = () => files.viewCounts()?.colors[c.name] ?? 0;
@@ -335,7 +355,7 @@ export function Sidebar() {
                   classList={{ "ring-2": view().kind === "color" && view().color === c.name }}
                   style={{
                     background: c.hex,
-                    "ring-color": "var(--accent)",
+                    "--tw-ring-color": "var(--accent)",
                     opacity: n() > 0 ? 1 : 0.35,
                   }}
                   title={`${c.name}${n() > 0 ? ` · ${n()} 张` : ""}`}
@@ -351,12 +371,12 @@ export function Sidebar() {
         </div>
 
         {/* ── 资源库 ───────────────────────────────── */}
-        <SectionHeader title="资源库" action={{ icon: "＋", title: "打开文件夹作为新库", onClick: openLibraryDir }} />
+        <SectionHeader title="资源库" action={{ icon: <IconPlus size={14} />, title: "打开文件夹作为新库", onClick: openLibraryDir }} />
         <div class="px-2 flex flex-col gap-0.5" ref={sidebarRef}>
           <For each={library.libraries()}>
             {(lib, index) => (
               <NavItem
-                icon={lib.is_network ? "🌐" : "💻"}
+                icon={lib.is_network ? <IconGlobe size={14} /> : <IconLibrary size={14} />}
                 label={lib.name}
                 count={lib.file_count}
                 active={library.activeLibraryId() === lib.id}
@@ -374,8 +394,27 @@ export function Sidebar() {
               />
             )}
           </For>
+          {/* 缩略图预热进度：整库补完自动收起。 */}
+          <For each={library.libraries()}>
+            {(lib) => (
+              <Show when={warmForLibrary(lib.id)}>
+                {(w) => (
+                  <div class="sidebar-item" style={{ "padding-left": "10px", cursor: "default" }}
+                    title={`${lib.name}：正在生成缩略图，已处理 ${w().done} / ${w().total} 张`}>
+                    <CircleProgress value={w().done} max={w().total} />
+                    <span class="truncate flex-1 text-2xs" style={{ color: "var(--text-muted)" }}>
+                      正在补齐 {lib.name} 的缩略图
+                    </span>
+                    <span class="text-2xs tabular-nums flex-shrink-0" style={{ color: "var(--accent)" }}>
+                      {w().done}/{w().total}
+                    </span>
+                  </div>
+                )}
+              </Show>
+            )}
+          </For>
           <Show when={library.libraries().length === 0}>
-            <p class="px-3 py-1 text-2xs" style={{ color: "var(--text-muted)" }}>还没有打开任何库</p>
+            <p class="px-2.5 py-1 text-2xs" style={{ color: "var(--text-muted)" }}>还没有打开任何库</p>
           </Show>
         </div>
 
@@ -384,11 +423,11 @@ export function Sidebar() {
           <SectionHeader title="文件夹" />
           <div class="px-2 flex flex-col gap-0.5">
             <Show when={files.folderTree()} fallback={
-              <p class="px-3 py-1 text-2xs" style={{ color: "var(--text-muted)" }}>加载中…</p>
+              <p class="px-2.5 py-1 text-2xs" style={{ color: "var(--text-muted)" }}>加载中…</p>
             }>
               {(tree) => (
                 <>
-                  <NavItem icon="🖼" label="整个库" count={tree().file_count}
+                  <NavItem icon={<IconImage size={14} />} label="整个库" count={tree().file_count}
                     active={view().kind === "all" || view().kind === "recent" || view().kind === "favorite" || view().kind === "rated"}
                     title="显示整个库的图片"
                     onClick={() => files.setView({ kind: "all" })} />
@@ -409,14 +448,16 @@ export function Sidebar() {
         {/* ── 标签 ─────────────────────────────────── */}
         <Show when={library.activeLibrary()}>
           <SectionHeader title="标签"
-            action={{ icon: "＋", title: "新建标签", onClick: () => setShowNewTag(!showNewTag()) }} />
+            action={{ icon: <IconPlus size={14} />, title: "新建标签", onClick: () => setShowNewTag(!showNewTag()) }} />
           <div class="px-2 flex flex-col gap-0.5">
             <Show when={showNewTag()}>
-              <div class="flex gap-1 mb-1 px-1">
+              <div class="flex gap-1 mb-1 px-2.5">
                 <input class="input flex-1 text-xs py-1" placeholder="新建标签..." value={newTagName()}
                   onInput={(e) => setNewTagName(e.currentTarget.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleCreateTag()} />
-                <button class="btn-primary text-xs px-2" onClick={handleCreateTag}>✓</button>
+                <button class="btn-primary text-xs px-2 flex items-center" onClick={handleCreateTag}>
+                  <IconCheck size={13} />
+                </button>
               </div>
             </Show>
             <Show when={tags.tags().length === 0} fallback={
@@ -429,7 +470,7 @@ export function Sidebar() {
                 )}
               </For>
             }>
-              <p class="px-3 py-1 text-2xs" style={{ color: "var(--text-muted)" }}>
+              <p class="px-2.5 py-1 text-2xs" style={{ color: "var(--text-muted)" }}>
                 还没有标签。选中图片后在右键菜单里添加。
               </p>
             </Show>

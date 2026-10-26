@@ -139,7 +139,7 @@ async fn import_library(
         thumbnail_cache_size: lib.thumbnail.cache_size(),
     };
     // 导入完就排队生成缩略图，避免用户翻到哪张才现解哪张。
-    crate::commands::files::enqueue_missing_thumbnails(&state.thumbs, &lib, &library_id);
+    crate::commands::files::enqueue_missing_thumbnails(&state.thumbs, &lib, &library_id, false);
     drop(lib);
 
     Ok(ImportSummary {

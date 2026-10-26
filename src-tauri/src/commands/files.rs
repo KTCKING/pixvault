@@ -1,9 +1,11 @@
 use tauri::State;
 use crate::AppState;
 use crate::engine::thumbs::{
-    job_key, preview_job_key, Priority, ThumbJob, ThumbKind, ThumbProgress, ThumbWorker, THUMB_SIZE,
+    job_key, preview_job_key, Priority, ThumbJob, ThumbKind, ThumbProgress, ThumbWorker, WarmProgress,
+    THUMB_SIZE,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -339,15 +341,38 @@ pub struct ThumbnailResult {
     pub path: String,
 }
 
+/// 批量缩略图查询的单条结果（语义同 [`ThumbnailResult`]，外加占位图）。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ThumbBatchItem {
+    pub path: String,
+    /// `ready` / `fallback` / `pending`，语义同 [`ThumbnailResult`]。
+    pub status: String,
+    /// `ready` / `fallback` 时的图片地址。
+    pub thumb: String,
+    /// 已缓存的模糊占位图（32px data URL）；没有则为空串。
+    pub placeholder: String,
+}
+
 /// 把某个图库里所有「还没有缩略图」的文件排进后台队列。
 ///
 /// 只做一次数据库查询 + 每个文件一次 `exists()`，**不做任何解码**，所以可以
 /// 放心地在持有图库锁时调用。
+///
+/// `force = false` 时尊重「打开图库时后台补齐缩略图」这个开关（默认开）；
+/// 手动触发的「补齐缺失缩略图」传 `true`，不受开关影响。
+///
+/// 排完队会登记本轮预热进度（见 [`ThumbWorker::begin_warm]`），侧边栏据此在
+/// 库名旁边画圆环。
 pub fn enqueue_missing_thumbnails(
     thumbs: &Arc<ThumbWorker>,
     lib: &crate::engine::Library,
     library_id: &str,
+    force: bool,
 ) -> usize {
+    if !force && !thumbs.prewarm_enabled() {
+        return 0;
+    }
+
     // 尺寸 / 质量参数变了就先清掉上一版缓存（内部有版本哨兵，平时只读一个小
     // 文件），否则磁盘上会同时躺着 `_512.jpg` 和 `_448.jpg` 两套缩略图。
     lib.thumbnail.ensure_cache_version();
@@ -358,6 +383,7 @@ pub fn enqueue_missing_thumbnails(
     };
 
     let mut jobs: Vec<ThumbJob> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
     for (path, hash) in candidates {
         let hash = hash
             .filter(|h| !h.is_empty())
@@ -365,8 +391,10 @@ pub fn enqueue_missing_thumbnails(
         if lib.thumbnail.thumbnail_path(&hash, THUMB_SIZE).exists() {
             continue;
         }
+        let key = job_key(library_id, &path);
+        keys.push(key.clone());
         jobs.push(ThumbJob {
-            key: job_key(library_id, &path),
+            key,
             path: path.clone(),
             source: std::path::PathBuf::from(&path),
             hash,
@@ -379,6 +407,9 @@ pub fn enqueue_missing_thumbnails(
     if n > 0 {
         thumbs.enqueue(jobs);
     }
+    // 即使 n == 0 也要登记：这样会把上一轮残留的进度收成「本轮无待办」，
+    // 界面上的进度环随之收起。
+    thumbs.begin_warm(library_id, keys);
     n
 }
 
@@ -440,6 +471,122 @@ pub async fn get_thumbnail_path(
     // 屏幕上看得到的图插队，不必等整库补齐的批处理跑完。
     state.thumbs.enqueue_with(vec![job], Priority::Urgent);
     Ok(ThumbnailResult { status: "pending".into(), path: String::new() })
+}
+
+/// 批量版 [`get_thumbnail_path`]：一次 IPC 拿一整屏的图。
+///
+/// 虚拟化网格每次滚动都会重算渲染窗口，逐张 IPC 的话一屏就是几十次往返；
+/// 合成一次之后，前端「滚动 → 120ms 去抖 → 一次提交整屏」的模式才成立。
+///
+/// `window` 是前端声明的「当前视口路径集合」：除了给这些图插队，还会把窗口
+/// 之外的过期 urgent 任务降级回整库队列（见 [`ThumbWorker::enqueue_window`]）。
+#[tauri::command]
+pub async fn get_thumbnails(
+    library_id: String,
+    paths: Vec<String>,
+    window: Option<Vec<String>>,
+    state: State<'_, AppState>,
+) -> Result<Vec<ThumbBatchItem>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out: Vec<ThumbBatchItem> = Vec::with_capacity(paths.len());
+    let mut jobs: Vec<ThumbJob> = Vec::new();
+    // 库里查不到的路径（刚被挪走 / 删掉的），最后统一按 pending 回，免得前端
+    // 把它当成「这张生成不出来」而退回原图。
+    let mut unknown: Vec<String> = Vec::new();
+    let declared: Option<HashSet<String>> = window.map(|w| {
+        w.into_iter().map(|p| job_key(&library_id, &p)).collect()
+    });
+
+    {
+        let engine = state.engine.lock().map_err(|_| "引擎锁失效".to_string())?;
+        let lib = engine.get_library(&library_id).ok_or("未找到图库")?;
+        let lib = lib.lock().map_err(|_| "图库锁失效".to_string())?;
+
+        for file_path in &paths {
+            let key = job_key(&library_id, file_path);
+
+            // ① 内存里已有结论的，直接回答，连数据库都不用碰。
+            if let Some(resolved) = state.thumbs.lookup(&key) {
+                out.push(match resolved {
+                    Some(thumb) => ThumbBatchItem {
+                        path: file_path.clone(),
+                        status: "ready".into(),
+                        thumb,
+                        placeholder: String::new(),
+                    },
+                    None => ThumbBatchItem {
+                        path: file_path.clone(),
+                        status: "fallback".into(),
+                        thumb: file_path.clone(),
+                        placeholder: String::new(),
+                    },
+                });
+                continue;
+            }
+
+            let Some(entry) = lib.db.get_file_by_path(file_path).map_err(|e| e.to_string())? else {
+                unknown.push(file_path.clone());
+                continue;
+            };
+
+            // 索引阶段没有算过内容哈希，退化成「路径哈希」—— 与后台任务保持一致。
+            let hash = entry
+                .blake3_hash
+                .filter(|h| !h.is_empty())
+                .unwrap_or_else(|| crate::utils::hash::blake3_hash_bytes(file_path.as_bytes()));
+
+            let thumb_path = lib.thumbnail.thumbnail_path(&hash, THUMB_SIZE);
+            if thumb_path.exists() {
+                let thumb = thumb_path.to_string_lossy().to_string();
+                state.thumbs.remember(&key, thumb.clone());
+                out.push(ThumbBatchItem {
+                    path: file_path.clone(),
+                    status: "ready".into(),
+                    thumb,
+                    placeholder: String::new(),
+                });
+                continue;
+            }
+
+            // ② 真图还没生成：顺手把**已经缓存**的模糊占位图带上（纯磁盘读，
+            //    约 0.5 KB），卡片立刻有东西可显示，不必等解码。
+            out.push(ThumbBatchItem {
+                path: file_path.clone(),
+                status: "pending".into(),
+                thumb: String::new(),
+                placeholder: lib.thumbnail.read_placeholder(&hash).unwrap_or_default(),
+            });
+
+            jobs.push(ThumbJob {
+                key,
+                path: file_path.clone(),
+                source: std::path::PathBuf::from(file_path),
+                hash,
+                engine: lib.thumbnail.clone(),
+                kind: ThumbKind::Grid,
+            });
+        }
+    } // 锁在这里释放，解码过程绝不持锁
+
+    // 即使没有新任务也要调用：窗口外的过期 urgent 任务需要被降级回整库队列。
+    match declared {
+        Some(win) => state.thumbs.enqueue_window(jobs, &win),
+        None => state.thumbs.enqueue_with(jobs, Priority::Urgent),
+    }
+
+    for file_path in unknown {
+        out.push(ThumbBatchItem {
+            path: file_path,
+            status: "pending".into(),
+            thumb: String::new(),
+            placeholder: String::new(),
+        });
+    }
+
+    Ok(out)
 }
 
 /// 取一张图的**右侧预览图**路径（1600px）。
@@ -550,6 +697,9 @@ pub async fn read_thumb_data_url(
 }
 
 /// 手动触发一次「补齐缺失缩略图」。
+///
+/// 与打开图库时的自动预热是同一条路径，区别是**不受预热开关影响** —— 用户
+/// 关掉了自动预热之后，仍然可以在这里手动跑一次。
 #[tauri::command]
 pub async fn build_missing_thumbnails(
     library_id: String,
@@ -558,7 +708,41 @@ pub async fn build_missing_thumbnails(
     let engine = state.engine.lock().map_err(|_| "引擎锁失效".to_string())?;
     let lib = engine.get_library(&library_id).ok_or("未找到图库")?;
     let lib = lib.lock().map_err(|_| "图库锁失效".to_string())?;
-    Ok(enqueue_missing_thumbnails(&state.thumbs, &lib, &library_id))
+    Ok(enqueue_missing_thumbnails(&state.thumbs, &lib, &library_id, true))
+}
+
+/// 所有图库的缩略图预热进度（侧边栏库名旁的圆环用它）。
+#[tauri::command]
+pub async fn get_warm_progress(state: State<'_, AppState>) -> Result<Vec<WarmProgress>, String> {
+    Ok(state.thumbs.all_warm_progress())
+}
+
+/// 读取「打开图库时后台补齐缩略图」的开关状态。
+#[tauri::command]
+pub async fn get_prewarm_enabled(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.thumbs.prewarm_enabled())
+}
+
+/// 设置「打开图库时后台补齐缩略图」。默认开启。
+///
+/// 关掉之后：打开 / 导入 / 恢复图库不会再自动排队，但滚动到哪张生成哪张的
+/// 按需路径完全不受影响，手动「补齐缺失缩略图」也仍然可用。
+#[tauri::command]
+pub async fn set_prewarm_enabled(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
+    state.thumbs.set_prewarm_enabled(enabled);
+    Ok(())
+}
+
+/// 前端上报「用户正在滚动 / 拖拽」——触发后台的交互感知节流。
+///
+/// 后台收到后会在接下来约 0.5 秒内**暂停整库预热队列**，只继续做用户当前
+/// 视口（urgent）的任务，把 CPU 让给界面渲染。不需要「交互结束」的上报：
+/// 静默窗口到期自动恢复满速，所以前端可以在滚动回调里放心频繁调用
+/// （前端已做约 120ms 的限流）。
+#[tauri::command]
+pub async fn thumbs_interaction(state: State<'_, AppState>) -> Result<(), String> {
+    state.thumbs.note_interaction();
+    Ok(())
 }
 
 #[tauri::command]

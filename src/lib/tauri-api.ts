@@ -152,8 +152,34 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return { total: 0, done: 0, running: false } as unknown as T;
     }
 
+    case "get_warm_progress":
+      return [] as unknown as T;
+
+    case "get_prewarm_enabled":
+      return true as unknown as T;
+
+    case "set_prewarm_enabled":
+      return undefined as unknown as T;
+
     case "build_missing_thumbnails":
       return 0 as unknown as T;
+
+    case "thumbs_interaction":
+      return null as unknown as T;
+
+    case "get_gpu_status":
+      return {
+        mode: "auto",
+        software_rendering: false,
+        crashed_last_run: false,
+      } as unknown as T;
+
+    case "set_gpu_mode":
+      return {
+        mode: (args?.mode as string) || "auto",
+        software_rendering: (args?.mode as string) === "software",
+        crashed_last_run: false,
+      } as unknown as T;
 
     case "ui_ready":
       return undefined as unknown as T;
@@ -344,6 +370,16 @@ export interface ThumbnailResult {
   path: string;
 }
 
+/** 批量缩略图查询的单条结果（语义同 ThumbnailResult，外加占位图）。 */
+export interface ThumbBatchItem {
+  path: string;
+  status: "ready" | "fallback" | "pending";
+  /** ready / fallback 时的图片地址。 */
+  thumb: string;
+  /** 已缓存的模糊占位图（32px data URL）；没有则为空串。 */
+  placeholder: string;
+}
+
 /** 后台缩略图任务的进度。 */
 export interface ThumbProgress {
   total: number;
@@ -351,10 +387,32 @@ export interface ThumbProgress {
   running: boolean;
 }
 
+/**
+ * 某个图库的「缩略图预热」进度。
+ *
+ * 打开 / 导入 / 恢复图库时会自动把还缺缩略图的文件排进后台队列（默认启用），
+ * 侧边栏据此在图库名旁边画一个圆形进度环。
+ */
+export interface WarmProgress {
+  library_id: string;
+  /** 本轮需要补齐的图片总数。 */
+  total: number;
+  /** 已处理数量。 */
+  done: number;
+  /** 是否仍在处理。 */
+  running: boolean;
+}
+
 /** `thumb-ready` 事件的载荷元素。`thumb` 为 null 表示生成失败、应退回原图。 */
 export interface ThumbReadyItem {
   path: string;
   thumb: string | null;
+}
+
+/** `thumb-placeholder` 事件的载荷元素：一张图的模糊占位图（32px data URL）。 */
+export interface ThumbPlaceholderItem {
+  path: string;
+  data: string;
 }
 
 export interface NasStatus {
@@ -386,7 +444,23 @@ export interface DuplicateGroup {
   files: FileInfo[];
 }
 
+/** 渲染方式。`auto` = 跟着崩溃哨兵走；`hardware` = 强制尝试 GPU（仍保留崩溃保护）。 */
+export type GpuMode = "auto" | "hardware" | "software";
+
+export interface GpuStatus {
+  mode: GpuMode;
+  /** 当前生效的是不是软件渲染。 */
+  software_rendering: boolean;
+  /** 是否有过「启动没走到界面就绪」的记录 —— 自动降级的原因。 */
+  crashed_last_run: boolean;
+}
+
 // ── API Functions ────────────────────────────────
+
+/** 交互上报的最小间隔（毫秒）。后端静默窗口约 460ms，120ms 足够把「连续滚动」
+ *  压成每秒 8 次左右的 IPC，又不至于让后端误以为用户已经停手。 */
+const INTERACTION_PING_MS = 120;
+let lastInteractionPing = 0;
 
 export const api = {
   // Library
@@ -480,6 +554,19 @@ export const api = {
   getThumbnailPath: (libraryId: string, filePath: string) =>
     invoke<ThumbnailResult>("get_thumbnail_path", { libraryId, filePath }),
 
+  /**
+   * 批量取缩略图（一次 IPC 一整屏）。
+   *
+   * `window` 是前端声明的「当前视口路径集合」：除了给这些图插队，还会把窗口
+   * 之外的过期 urgent 任务降级回整库队列。虚拟化网格滚动时由父组件整屏提交。
+   */
+  getThumbnails: (libraryId: string, paths: string[], window?: string[]) =>
+    invoke<ThumbBatchItem[]>("get_thumbnails", {
+      libraryId,
+      paths,
+      window: window ?? null,
+    }),
+
   /** 右侧预览栏用的 1600px 预览图（按需生成，结果走 `preview-ready` 事件）。 */
   getPreviewPath: (libraryId: string, filePath: string) =>
     invoke<ThumbnailResult>("get_preview_path", { libraryId, filePath }),
@@ -499,8 +586,44 @@ export const api = {
   getThumbnailProgress: () =>
     invoke<ThumbProgress>("get_thumbnail_progress"),
 
+  /** 所有图库的缩略图预热进度（侧边栏库名旁的圆环）。 */
+  getWarmProgress: () =>
+    invoke<WarmProgress[]>("get_warm_progress"),
+
+  /** 读取「打开图库时后台补齐缩略图」开关。 */
+  getPrewarmEnabled: () =>
+    invoke<boolean>("get_prewarm_enabled"),
+
+  /** 设置「打开图库时后台补齐缩略图」。默认开启。 */
+  setPrewarmEnabled: (enabled: boolean) =>
+    invoke<void>("set_prewarm_enabled", { enabled }),
+
+  /* 手动补齐缺失缩略图（不受预热开关影响）。返回本轮排入队列的数量。 */
   buildMissingThumbnails: (libraryId: string) =>
     invoke<number>("build_missing_thumbnails", { libraryId }),
+
+  /**
+   * 上报「用户正在滚动 / 拖拽」。
+   *
+   * 后端收到后会在约 0.5 秒的静默窗口内**暂停整库预热队列**，只继续做用户
+   * 当前视口（urgent）的任务，把 CPU 让给界面渲染；窗口到期自动恢复满速，
+   * 所以不需要上报「交互结束」。
+   *
+   * **限流在函数内部**（约 120ms 一次、fire-and-forget 不 await），调用方可以
+   * 直接在滚动回调里无脑调。
+   */
+  notifyInteraction: (): void => {
+    const now = Date.now();
+    if (now - lastInteractionPing < INTERACTION_PING_MS) return;
+    lastInteractionPing = now;
+    void invoke<void>("thumbs_interaction").catch(() => {});
+  },
+
+  /** 当前渲染方式、是否软件渲染、有没有被自动降级过。 */
+  getGpuStatus: () => invoke<GpuStatus>("get_gpu_status"),
+
+  /** 切换渲染方式。**重启应用后生效**（WebView2 启动参数只在建窗时能传）。 */
+  setGpuMode: (mode: GpuMode) => invoke<GpuStatus>("set_gpu_mode", { mode }),
 
   openInExplorer: (filePath: string) =>
     invoke<void>("open_in_explorer", { filePath }),

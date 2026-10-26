@@ -7,6 +7,7 @@ import { useFilesStore } from "@/stores/files";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { thumbUrl, toDisplaySrc } from "@/lib/thumbs";
+import { IconCheck, IconChevronRight, IconClose, IconFolderOpen, IconHeart, IconImage, IconLink, IconSort, IconStarFilled } from "@/components/icons";
 
 interface Props {
   /** 当前展示的文件；为 null 时面板显示「未选择文件 + 图库文件数」。 */
@@ -28,12 +29,12 @@ function Section(props: {
         onClick={props.onToggle}
       >
         <span
-          class="text-2xs transition-transform duration-150"
+          class="flex transition-transform duration-150"
           style={{
             color: "var(--text-muted)",
             transform: props.open ? "rotate(90deg)" : "none",
           }}
-        >▶</span>
+        ><IconChevronRight size={11} /></span>
         <span class="text-2xs font-semibold tracking-wide" style={{ color: "var(--text-secondary)" }}>
           {props.title}
         </span>
@@ -295,22 +296,24 @@ export function InfoPanel(props: Props) {
        列数由 auto-fill 自动从 6 列收成 5 列（不再浮层遮挡图片）。 */
     <aside class="info-panel w-[19rem] flex-shrink-0 flex flex-col overflow-hidden animate-slide-in-right">
       {/* 头部 */}
-      <div class="flex items-center h-9 pl-3 pr-1.5 flex-shrink-0" style={{ borderBottom: `1px solid ${s.border}` }}>
+      <div class="flex items-center h-9 pl-3 pr-1.5 flex-shrink-0" style={{ "border-bottom": `1px solid ${s.border}` }}>
         <span class="text-xs font-semibold" style={{ color: s.text }}>文件信息</span>
         <div class="flex-1" />
-        <button class="btn-ghost text-2xs px-1.5 py-0.5" title="展开／折叠全部分区"
+        <button class="btn-ghost text-2xs px-1.5 py-0.5 flex" title="展开／折叠全部分区"
           onClick={() => {
             const next = !(openInfo() && openMeta());
             setOpenInfo(next);
             setOpenMeta(next);
-          }}>⇕</button>
-        <button class="btn-ghost text-xs px-1.5 py-0.5" title="关闭" onClick={props.onClose}>✕</button>
+          }}><IconSort size={13} /></button>
+        <button class="btn-ghost text-xs px-1.5 py-0.5 flex" title="关闭" onClick={props.onClose}><IconClose size={13} /></button>
       </div>
 
       {/* 未选择文件：只显示图库文件数量（Pixcall 也是如此） */}
       <Show when={props.filePath} fallback={
-        <div class="flex-1 flex flex-col items-center justify-center gap-1.5 px-6 text-center">
-          <div class="text-3xl opacity-50">🖼️</div>
+        <div class="flex-1 flex flex-col items-center justify-center gap-1.5 px-6 text-center" style={{ color: "var(--text-muted)" }}>
+          <div class="opacity-50 mb-1">
+            <IconImage size={30} />
+          </div>
           <p class="text-xs" style={{ color: s.muted }}>未选择文件</p>
           <p class="text-sm font-medium" style={{ color: s.text }}>
             当前图库 {libFileCount()} 个文件
@@ -377,7 +380,7 @@ export function InfoPanel(props: Props) {
                                       <span class="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: tag.color || s.muted }} />
                                       <span class="truncate flex-1">{tag.name}</span>
                                       <Show when={applied()}>
-                                        <span style={{ color: s.accent }}>✓</span>
+                                        <span class="flex" style={{ color: s.accent }}><IconCheck size={13} /></span>
                                       </Show>
                                     </div>
                                   );
@@ -385,7 +388,7 @@ export function InfoPanel(props: Props) {
                               </For>
                             </Show>
                           </div>
-                          <div class="flex gap-1 p-1.5" style={{ borderTop: `1px solid ${s.border}` }}>
+                          <div class="flex gap-1 p-1.5" style={{ "border-top": `1px solid ${s.border}` }}>
                             <input class="input flex-1 text-xs py-1" placeholder="新建标签..." value={newTagName()}
                               onInput={(e) => setNewTagName(e.currentTarget.value)}
                               onKeyDown={(e) => { if (e.key === "Enter") handleCreateAndAddTag(); }} />
@@ -417,18 +420,19 @@ export function InfoPanel(props: Props) {
                     <Block label="评分">
                       <div class="flex gap-0.5">
                         {[1, 2, 3, 4, 5].map((star) => (
-                          <button class="text-base leading-none transition-colors"
+                          <button class="flex items-center leading-none transition-colors"
                             style={{ color: (info().rating || 0) >= star ? "var(--star-color)" : s.muted }}
-                            onClick={() => handleRating(star)}>★</button>
+                            onClick={() => handleRating(star)}><IconStarFilled size={14} /></button>
                         ))}
                       </div>
                     </Block>
 
                     <Row label="收藏">
-                      <button class="text-sm leading-none transition-colors"
+                      <button class="flex items-center gap-1 text-sm leading-none transition-colors"
                         style={{ color: info().favorite ? "#ff6b6b" : s.muted }}
                         onClick={() => handleFavorite(!info().favorite)}>
-                        {info().favorite ? "♥ 已收藏" : "♡ 收藏"}
+                        <IconHeart size={13} />
+                        {info().favorite ? "已收藏" : "收藏"}
                       </button>
                     </Row>
 
@@ -438,7 +442,7 @@ export function InfoPanel(props: Props) {
                           {(c) => (
                             <button class="w-4 h-4 rounded-full transition-transform hover:scale-110"
                               classList={{ "ring-2 ring-offset-1": info().color_label === c.name }}
-                              style={{ background: c.hex, "ring-color": "var(--accent)" }}
+                              style={{ background: c.hex, "--tw-ring-color": "var(--accent)" }}
                               title={c.name}
                               onClick={() => handleColor(info().color_label === c.name ? null : c.name)} />
                           )}
@@ -476,12 +480,14 @@ export function InfoPanel(props: Props) {
       </Show>
 
       {/* 底部操作 */}
-      <div class="flex gap-1.5 p-2 flex-shrink-0" style={{ borderTop: `1px solid ${s.border}` }}>
-        <button class="btn-secondary text-2xs flex-1 py-1" onClick={() => props.filePath && api.openInExplorer(props.filePath)}>
-          📂 显示位置
+      <div class="flex gap-1.5 p-2 flex-shrink-0" style={{ "border-top": `1px solid ${s.border}` }}>
+        <button class="btn-secondary text-2xs flex-1 py-1 flex items-center justify-center gap-1.5" onClick={() => props.filePath && api.openInExplorer(props.filePath)}>
+          <IconFolderOpen size={13} />
+          显示位置
         </button>
-        <button class="btn-secondary text-2xs flex-1 py-1" onClick={() => props.filePath && api.openFile(props.filePath)}>
-          🔗 打开方式
+        <button class="btn-secondary text-2xs flex-1 py-1 flex items-center justify-center gap-1.5" onClick={() => props.filePath && api.openFile(props.filePath)}>
+          <IconLink size={13} />
+          打开方式
         </button>
       </div>
     </aside>

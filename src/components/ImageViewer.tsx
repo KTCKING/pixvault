@@ -1,6 +1,7 @@
 import { Show, onMount, onCleanup, createSignal } from "solid-js";
 import { useViewerStore } from "@/stores/viewer";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { IconClose } from "@/components/icons";
 
 export function ImageViewer() {
   const viewer = useViewerStore();
@@ -101,8 +102,10 @@ export function ImageViewer() {
         onMouseLeave={handleMouseUp}
       >
         {/* Close button */}
-        <button class="absolute top-4 right-4 z-10 w-10 h-10 flex items-center justify-center rounded-full text-2xl transition-colors"
-          style={{ background: "rgba(255,255,255,0.1)", color: "#fff" }} onClick={viewer.close}>✕</button>
+        <button class="absolute top-4 right-4 z-10 w-10 h-10 flex items-center justify-center rounded-full transition-colors"
+          style={{ background: "rgba(255,255,255,0.1)", color: "#fff" }} onClick={viewer.close} title="关闭 (Esc)">
+          <IconClose size={18} />
+        </button>
 
         {/* Info bar */}
         <div class="absolute top-4 left-4 z-10 text-sm" style={{ color: "rgba(255,255,255,0.7)" }}>
