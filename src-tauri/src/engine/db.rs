@@ -584,11 +584,30 @@ impl Database {
 
         for p in &paths {
             // 元数据目录不进树。
-            if p.split(['/', '\\']).any(|c| c == ".pixvault") {
+            if p.split(['/', '\\']).any(|c| c == ".pixvault" || c == ".prism") {
                 continue;
             }
             let Some(idx) = p.rfind(sep) else { continue };
-            let dir = &p[..idx];
+            // Eagle 的素材是「一条一个壳目录」：`<ITEM_ID>.info/photo.jpg`。
+            // 那一层不是用户概念里的文件夹，只是文件自己的容器 —— 不折叠掉的话，
+            // 侧栏「文件夹」会被几百个 MVQ55RU1NL8GV.info 淹掉。
+            // 这里只影响侧栏展示与筛选归属，磁盘结构原样不动。
+            let mut dir = &p[..idx];
+            while let Some(name) = dir.rsplit(sep).next() {
+                if !is_item_container(name) {
+                    break;
+                }
+                match dir.rfind(sep) {
+                    Some(i) => dir = &dir[..i],
+                    None => {
+                        dir = "";
+                        break;
+                    }
+                }
+            }
+            if dir.is_empty() {
+                continue;
+            }
             // 登记这条路径上的每一级目录（直到库根）。
             let mut cur = dir.to_string();
             loop {
@@ -842,4 +861,17 @@ impl Database {
     pub fn conn(&self) -> &Connection {
         &self.conn
     }
+}
+
+/// 判断一个目录名是不是「一条素材自己的壳」。
+///
+/// Eagle 的库与素材包都是这个结构：每条素材一个 `<ITEM_ID>.info/` 目录，
+/// 原图、缩略图、metadata.json 都塞在里面。它不是用户建的文件夹，只是文件的容器，
+/// 所以在文件夹树里要折叠掉 —— 否则一个几百条素材的库，侧栏会列出几百个
+/// `MVQ55RU1NL8GV.info`。
+///
+/// 只认 `.info` 后缀这一个特征。真有人把文件夹起名叫 `photos.info` 会被误折叠，
+/// 但代价只是「这层不在侧栏出现」，文件本身照样在库根下可见，不会丢。
+fn is_item_container(name: &str) -> bool {
+    name.len() > 5 && name.to_ascii_lowercase().ends_with(".info")
 }

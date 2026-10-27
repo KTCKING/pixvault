@@ -158,9 +158,14 @@ pub async fn import_eaglepack(
                 format!("{}（文件已解压到 {}，你可以直接把它当普通文件夹打开）", e, dest_dir)
             })?;
 
-    let library_name = pack
-        .file_stem()
+    // 库名优先用「用户刚选的那个目标目录名」——那才是他在资源管理器里看到的、
+    // 下次还要找回来的名字。退回包文件名 stem（很多网上下来的包叫 Untitled.eaglepack，
+    // 拿它当库名会让人一头雾水）。
+    let library_name = dest
+        .file_name()
         .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| pack.file_stem().map(|s| s.to_string_lossy().to_string()))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Eagle 素材包".to_string());
 
