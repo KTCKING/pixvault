@@ -1,17 +1,31 @@
-import { createSignal, onMount, Show } from "solid-js";
+import { createSignal, onMount, onCleanup, Show } from "solid-js";
 import type { JSX } from "solid-js";
-import { api, type GpuMode, type GpuStatus, type ImportSummary } from "@/lib/tauri-api";
+import { api, type GpuMode, type GpuStatus, type ImportSummary, type PackProbe, type PackProgress } from "@/lib/tauri-api";
 import { useLibraryStore, warmForLibrary } from "@/stores/library";
 import { useUIStore } from "@/stores/ui";
 import { CircleProgress } from "./CircleProgress";
 import { open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import { useTheme } from "@/stores/theme";
-import { IconArrowRight, IconClose, IconEagle, IconPackage } from "@/components/icons";
+import { IconArrowRight, IconClose, IconDatabase, IconEagle, IconPackage } from "@/components/icons";
 
 interface Props {
   onClose: () => void;
   onImported: () => void;
 }
+
+/** 把字节数写成人类能读的大小。 */
+const fmtBytes = (n: number): string => {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+};
 
 export function SettingsModal(props: Props) {
   const theme = useTheme();
@@ -22,6 +36,9 @@ export function SettingsModal(props: Props) {
   const [error, setError] = createSignal("");
   const [gpu, setGpu] = createSignal<GpuStatus | null>(null);
   const [gpuBusy, setGpuBusy] = createSignal(false);
+  /** 选完 .eaglepack 后先给出的统计，等用户确认再解压 */
+  const [pendingPack, setPendingPack] = createSignal<{ path: string; probe: PackProbe } | null>(null);
+  const [packProgress, setPackProgress] = createSignal<PackProgress | null>(null);
 
   onMount(async () => {
     try {
@@ -29,6 +46,12 @@ export function SettingsModal(props: Props) {
     } catch {
       /* 拿不到就按「未知」渲染，不影响其它设置项 */
     }
+  });
+
+  // 解压进度（几千个条目、几个 GB 的包都靠它给反馈）
+  onMount(async () => {
+    const un = await listen<PackProgress>("eaglepack-progress", (e) => setPackProgress(e.payload));
+    onCleanup(un);
   });
 
   /** 切换渲染方式。改完立刻落盘，但要重启才生效（WebView2 参数只能在建窗时传）。 */
@@ -115,6 +138,79 @@ export function SettingsModal(props: Props) {
     } finally {
       setBusy(false);
     }
+  };
+
+  /** 第一步：选 .eaglepack，先只读中央目录给出统计，不解压。 */
+  const chooseEaglepack = async () => {
+    setError("");
+    setResult(null);
+    setPendingPack(null);
+    try {
+      const picked = await open({
+        multiple: false,
+        title: "选择 Eagle 素材包",
+        filters: [{ name: "Eagle 素材包", extensions: ["eaglepack", "zip"] }],
+      });
+      if (!picked) return;
+
+      setBusy(true);
+      const probe = await api.probeEaglepack(picked as string);
+      if (probe.layout === "unknown") {
+        throw new Error(
+          "这个包里既没有 pack.json，也没有 Eagle 库的 metadata.json + images 目录，无法识别。",
+        );
+      }
+      setPendingPack({ path: picked as string, probe });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 第二步：选目标文件夹（会作为新图库的根），然后流式解压。 */
+  const startEaglepack = async () => {
+    const pending = pendingPack();
+    if (!pending) return;
+
+    const dest = await open({
+      directory: true,
+      multiple: false,
+      title: "选择解压到哪里（需空文件夹，它会成为新图库的根）",
+    });
+    if (!dest) return;
+
+    setBusy(true);
+    setError("");
+    setResult(null);
+    setPackProgress(null);
+    try {
+      const summary = await api.importEaglepack(pending.path, dest as string);
+
+      library.setLibraries((prev) => {
+        if (prev.find((l) => l.id === summary.library.id)) return prev;
+        return [...prev, summary.library];
+      });
+      library.setActiveLibraryId(summary.library.id);
+
+      setResult(summary);
+      setPendingPack(null);
+      props.onImported();
+    } catch (e) {
+      const msg = String(e);
+      setError(
+        msg.includes("__canceled__")
+          ? "已取消导入，解压出的半成品已清理。"
+          : msg,
+      );
+    } finally {
+      setBusy(false);
+      setPackProgress(null);
+    }
+  };
+
+  const cancelPack = () => {
+    void api.cancelEaglepackImport();
   };
 
   return (
@@ -231,13 +327,78 @@ export function SettingsModal(props: Props) {
             onPick={() => pickAndImport("eagle")}
           />
           <ImportRow
-            icon={<IconPackage size={20} />}
+            icon={<IconDatabase size={20} />}
             title="导入 Pixcall 资源库"
             desc="读取 .pixcall/database/main.db，保留文件夹层级、标签、描述、评分与来源网址"
             busy={busy()}
             onPick={() => pickAndImport("pixcall")}
           />
+          <ImportRow
+            icon={<IconPackage size={20} />}
+            title="导入 Eagle 素材包（.eaglepack）"
+            desc="直接选 .eaglepack 文件：流式解压到目标文件夹并作为新图库打开，保留文件夹层级、标签、备注、评分与来源链接"
+            busy={busy()}
+            onPick={chooseEaglepack}
+          />
         </div>
+
+        {/* 选完包先给统计，让用户知道要占多少盘、里面有多少东西 */}
+        <Show when={pendingPack()}>
+          <div
+            class="mt-3 px-3 py-3 rounded-lg"
+            style={{ background: s.tertiary, border: `1px solid ${s.border}` }}
+          >
+            <div class="text-xs" style={{ color: s.primary }}>
+              {pendingPack()!.probe.item_count} 个条目 ·{" "}
+              {pendingPack()!.probe.folder_count} 个文件夹 · 解压后约{" "}
+              {fmtBytes(pendingPack()!.probe.unpacked_bytes)}
+            </div>
+            <div class="text-2xs mt-1" style={{ color: s.muted }}>
+              布局：{pendingPack()!.probe.layout === "pack" ? "Eagle 素材包（pack.json）" : "Eagle 库（metadata.json）"}
+              。目标文件夹需要预留上面这个体积的空闲空间。
+            </div>
+            <div class="flex gap-2 mt-2">
+              <button class="btn-primary text-xs px-3 py-1" onClick={startEaglepack}>
+                选择目标文件夹并开始
+              </button>
+              <button class="btn-secondary text-xs px-3 py-1" onClick={() => setPendingPack(null)}>
+                取消
+              </button>
+            </div>
+          </div>
+        </Show>
+
+        {/* 解压进度：几千个条目、几个 GB 的包都靠它给反馈 */}
+        <Show when={packProgress()}>
+          {(p) => (
+            <div class="mt-4">
+              <div class="flex items-center justify-between text-xs mb-1.5" style={{ color: s.secondary }}>
+                <span>
+                  {p().phase === "parse"
+                    ? "正在解析元数据…"
+                    : `正在解压 ${p().done} / ${p().total}`}
+                </span>
+                <button class="btn-ghost text-xs px-2 py-0.5" onClick={cancelPack}>
+                  取消
+                </button>
+              </div>
+              <div class="h-1.5 rounded-full overflow-hidden" style={{ background: s.tertiary }}>
+                <div
+                  class="h-full transition-all"
+                  style={{
+                    width: `${p().total ? Math.min(100, Math.round((p().done / p().total) * 100)) : 0}%`,
+                    background: s.accent,
+                  }}
+                />
+              </div>
+              <Show when={p().current}>
+                <div class="text-2xs mt-1 truncate" style={{ color: s.muted }} title={p().current}>
+                  {p().current}
+                </div>
+              </Show>
+            </div>
+          )}
+        </Show>
 
         <Show when={busy()}>
           <div class="text-sm mt-4" style={{ color: s.muted }}>正在导入，请稍候…</div>
@@ -255,6 +416,9 @@ export function SettingsModal(props: Props) {
             <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1" style={{ color: s.secondary }}>
               <span>文件 {result()!.imported_files} / {result()!.total_items}</span>
               <span>新建标签 {result()!.created_tags}</span>
+              <Show when={(result()!.skipped ?? 0) > 0}>
+                <span>跳过 {result()!.skipped}</span>
+              </Show>
             </div>
             <Show when={result()!.errors.length > 0}>
               <div class="mt-1" style={{ color: "var(--danger)" }}>{result()!.errors.length} 个文件导入失败</div>
@@ -262,8 +426,10 @@ export function SettingsModal(props: Props) {
           </div>
         </Show>
 
-        <div class="text-xs mt-5" style={{ color: s.muted }}>
-          导入会新建一个独立的图片库（以源库命名），不会与当前库的图片合并，也不会复制或移动原始文件。
+        <div class="text-xs mt-5 leading-relaxed" style={{ color: s.muted }}>
+          导入会新建一个独立的图片库（以源库命名），不会与当前库的图片合并。Eagle 库与 Pixcall
+          库是原地读取，不复制文件；<span style={{ color: s.secondary }}>eaglepack 不同</span>
+          ——包里的素材必须解压到硬盘上，所以会让你先选一个空文件夹，它就成为新图库的根，之后随时可以删掉那个文件夹。
         </div>
       </div>
     </div>

@@ -148,6 +148,9 @@ fn main() {
             commands::import::detect_library_kind,
             commands::import::import_eagle_library,
             commands::import::import_pixcall_library,
+            commands::import::probe_eaglepack,
+            commands::import::import_eaglepack,
+            commands::import::cancel_eaglepack_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PixVault");

@@ -63,8 +63,61 @@
 - Fluent 玻璃拟态界面（侧栏 / 标题栏 / 弹层真高斯模糊，卡片用伪玻璃兼顾性能）、黑白双主题、全套自绘线性图标
 - 套索框选、框选后拖拽到回收站、拖出窗口交给 OS（可丢进 QQ / 微信 / 资源管理器）
 - 全文搜索（FTS5 + LIKE 兜底）、重复文件查找
-- 导入 Eagle / Pixcall 库（设置面板）
+- 导入 Eagle / Pixcall 库，以及 **Eagle 素材包 `.eaglepack`**（流式解压、逐条目进度、可取消，见下节）
 - 深浅双主题、网格 / 瀑布流 / 列表三种视图、缩略图尺寸滑杆
+
+---
+
+## 导入 Eagle 素材包（`.eaglepack`）
+
+`.eaglepack` 不是黑盒——**它就是一个 zip**。Eagle 官方帮助中心给的自救办法就是「把后缀改成 `.zip` 打开，
+里面应该有 pack.json 和若干 info 文件夹」。所以难点不在压缩格式，在于**包里有两种布局**，都得认。
+
+```
+# ① Pack 布局：Eagle 自己导出的素材包、社区下载的免费包
+pack.json                       { "images": [ <全部条目元数据> ] }
+<ITEM_ID>.info/
+  ├ metadata.json               同一份元数据（副本，单独解包也能用）
+  ├ photo.jpg                   原始素材
+  └ photo_thumbnail.png         可选缩略图
+
+# ② Library 布局：把整个 .library 目录压成 zip（外面有时还套一层文件夹）
+metadata.json                   库级：文件夹树
+mtime.json
+images/<ITEM_ID>.info/…
+```
+
+两者都按**内容**识别（`pack.json` 有 `images` 数组 / `metadata.json` 有 `folders` 且旁边有 `images/`），
+不靠文件名猜，也不靠解压出来的目录名。
+
+### 导入流程
+
+1. 选 `.eaglepack`（或 `.zip`）→ 只读 zip 中央目录给出统计：多少条目、多少文件夹、解压后多大。
+   这一步不解压，几百 MB 的包也是毫秒级返回，你可以先看清再决定。
+2. 选一个**空文件夹**作为目标——它之后就是新图库的根。
+3. 流式解压：边读边写，不落临时文件（否则 1 GB 的包要占 2 GB 盘）。每 16 个条目回报一次进度，
+   随时可以取消。取消或失败会把半成品**整棵删掉**，不会给你留一个半截图库。
+4. 解压完直接把这个文件夹当新图库打开——零复制，和 Eagle / Pixcall 目录导入的语义一致。
+
+元数据映射与目录导入共用同一套规则（`import.rs::map_meta`）：Eagle 的文件夹归属 → 层级标签
+（`设计素材/图标`），`annotation` 优先于 `note`，`star` 1–5 直接当评分，`url` 存成来源链接。
+
+### 三条安全线
+
+- **zip slip**：只信 `enclosed_name()` 的返回值（已清掉 `..`、绝对路径、盘符），拿不到就跳过该条目。
+  绝不会拿原始文件名去拼路径——那是「解压一个包，文件跑到 `C://Windows` 去」的经典事故。
+- **跳过垃圾**：`__MACOSX/`、`.DS_Store`、`Thumbs.db`、`desktop.ini`。
+- **跳过不该导入的条目**：回收站里的（`isDeleted`）、Eagle 的网页书签（只有 url 和缩略图、没有原文件）。
+
+### 顺手修掉的既有 bug：缩略图有两种命名
+
+Eagle 的缩略图叫 `thumbnail.png`，叫 `<原名>_thumbnail.png` 的也真实存在。旧代码只跳过前缀式，
+后缀式的会被当成原图导进图库——表现是「每张图都多出一条很糊的记录」，而且哪张中招取决于
+`read_dir` 的返回顺序（文件系统给的，没保证），所以还是「我这边正常、你那边糊」的玄学 bug。
+
+现在两处都修了：`find_original_file` 两种命名都跳过，并按「`name.ext` 精确匹配 → `name.*` → 体积最大」
+挑原图，不再依赖遍历顺序；索引器也加了规则，跳过 `.info` 目录里的缩略图，且限定在这个目录结构内判断，
+不会误吞用户自己起名叫 `cover_thumbnail.jpg` 的图。
 
 ---
 
@@ -126,7 +179,8 @@
 │  engine/indexer.rs  目录扫描（跳过 .pixvault）+ 头部解析尺寸    │
 │  engine/thumbs.rs   缩略图 worker 池（rayon， urgent/bulk + 视口窗口降级）│
 │  engine/thumbnail.rs 448/1600 双档 + 32px LQIP + 缓存版本哨兵        │
-│  engine/import.rs   Eagle / Pixcall 库导入                    │
+│  engine/import.rs   Eagle / Pixcall 库导入 + 条目元数据映射    │
+│  engine/eaglepack.rs .eaglepack 流式解包 + 两种布局识别        │
 │  commands/          library files tags search import          │
 │  gpu.rs             GPU 崩溃哨兵 + 渲染模式开关（窗口在此创建）    │
 │  utils/winattr.rs   Windows 上给 .pixvault 打隐藏属性          │

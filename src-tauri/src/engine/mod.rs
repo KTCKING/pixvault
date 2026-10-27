@@ -6,6 +6,7 @@ pub mod watcher;
 pub mod search;
 pub mod dedup;
 pub mod import;
+pub mod eaglepack;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

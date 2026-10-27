@@ -53,45 +53,52 @@ pub fn detect_kind(root: &Path) -> Option<LibraryKind> {
 // ───────────────────────── Eagle ─────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct EagleRoot {
+pub(crate) struct EagleRoot {
     #[serde(default)]
-    folders: Vec<EagleFolder>,
+    pub(crate) folders: Vec<EagleFolder>,
 }
 
 #[derive(Debug, Deserialize)]
-struct EagleFolder {
-    id: String,
+pub(crate) struct EagleFolder {
+    pub(crate) id: String,
     #[serde(default)]
-    name: String,
+    pub(crate) name: String,
     #[serde(default)]
-    children: Vec<EagleFolder>,
+    pub(crate) children: Vec<EagleFolder>,
 }
 
 #[derive(Debug, Deserialize)]
-struct EagleItemMeta {
+pub(crate) struct EagleItemMeta {
     #[serde(default)]
-    tags: Vec<String>,
+    pub(crate) id: Option<String>,
+    /// 原始文件名（**不含扩展名**，Eagle 就是这样存的）。
     #[serde(default)]
-    folders: Vec<String>,
+    pub(crate) name: Option<String>,
+    /// 扩展名，不含点。
     #[serde(default)]
-    annotation: Option<String>,
+    pub(crate) ext: Option<String>,
     #[serde(default)]
-    note: Option<String>,
+    pub(crate) tags: Vec<String>,
     #[serde(default)]
-    url: Option<String>,
+    pub(crate) folders: Vec<String>,
     #[serde(default)]
-    star: Option<i32>,
+    pub(crate) annotation: Option<String>,
+    #[serde(default)]
+    pub(crate) note: Option<String>,
+    #[serde(default)]
+    pub(crate) url: Option<String>,
+    #[serde(default)]
+    pub(crate) star: Option<i32>,
+    /// 回收站里的条目仍会留在包内，导入时要跳过。
+    #[serde(default, rename = "isDeleted")]
+    pub(crate) is_deleted: bool,
 }
 
-pub fn import_eagle(root: &Path) -> Result<Vec<ImportItem>, String> {
-    let root_meta_path = root.join("metadata.json");
-    let root_json = std::fs::read_to_string(&root_meta_path)
-        .map_err(|e| format!("读取 metadata.json 失败: {}", e))?;
-    let eagle_root: EagleRoot = serde_json::from_str(&root_json)
-        .map_err(|e| format!("解析 Eagle metadata.json 失败: {}", e))?;
-
-    // Build folder id -> full path name (root folders, then nested).
-    let mut folder_paths: HashMap<String, String> = HashMap::new();
+/// 把 Eagle 的文件夹树摊平成 `id -> "父/子"` 的映射。
+///
+/// Eagle 的文件夹是**虚拟**的：磁盘上所有素材扁平地躺在 `images/<ID>.info/`，
+/// 归属关系只记在条目自己的 `folders: [id]` 里。所以要还原层级，只能靠这棵树。
+pub(crate) fn folder_path_map(folders: &[EagleFolder]) -> HashMap<String, String> {
     fn walk(folders: &[EagleFolder], prefix: &str, out: &mut HashMap<String, String>) {
         for f in folders {
             let full = if prefix.is_empty() {
@@ -103,7 +110,48 @@ pub fn import_eagle(root: &Path) -> Result<Vec<ImportItem>, String> {
             walk(&f.children, &full, out);
         }
     }
-    walk(&eagle_root.folders, "", &mut folder_paths);
+    let mut out = HashMap::new();
+    walk(folders, "", &mut out);
+    out
+}
+
+/// 一条 Eagle 元数据 → PixVault 的（标签, 备注, 评分, 来源）。
+///
+/// Eagle 库（.library）和 eaglepack 共用这一套映射。抽出来是为了避免两边规则
+/// 各写一份后漂移 —— 比如「annotation 优先于 note」「文件夹当层级标签」这两条，
+/// 只有一处说了算。
+pub(crate) fn map_meta(
+    meta: &EagleItemMeta,
+    folder_paths: &HashMap<String, String>,
+) -> (Vec<String>, Option<String>, Option<i32>, Option<String>) {
+    let mut tags = meta.tags.clone();
+    for fid in &meta.folders {
+        if let Some(path) = folder_paths.get(fid) {
+            if !path.is_empty() && !tags.iter().any(|t| t == path) {
+                tags.push(path.clone());
+            }
+        }
+    }
+    // Notes: prefer annotation, fall back to note.
+    let notes = meta
+        .annotation
+        .clone()
+        .or_else(|| meta.note.clone())
+        .filter(|s| !s.is_empty());
+    // Eagle star 是 1-5，PixVault 用 0-5 且 0 表示未评分 → 0 视作 None。
+    let rating = meta.star.filter(|s| *s > 0);
+    let source = meta.url.clone().filter(|s| !s.is_empty());
+    (tags, notes, rating, source)
+}
+
+pub fn import_eagle(root: &Path) -> Result<Vec<ImportItem>, String> {
+    let root_meta_path = root.join("metadata.json");
+    let root_json = std::fs::read_to_string(&root_meta_path)
+        .map_err(|e| format!("读取 metadata.json 失败: {}", e))?;
+    let eagle_root: EagleRoot = serde_json::from_str(&root_json)
+        .map_err(|e| format!("解析 Eagle metadata.json 失败: {}", e))?;
+
+    let folder_paths = folder_path_map(&eagle_root.folders);
 
     let images_dir = root.join("images");
     let mut items: Vec<ImportItem> = Vec::new();
@@ -119,54 +167,101 @@ pub fn import_eagle(root: &Path) -> Result<Vec<ImportItem>, String> {
         let meta_path = item_dir.join("metadata.json");
         let Ok(json) = std::fs::read_to_string(&meta_path) else { continue };
         let Ok(meta) = serde_json::from_str::<EagleItemMeta>(&json) else { continue };
-
-        // Resolve the original file: usually a single non-metadata file.
-        let original = find_original_file(&item_dir);
-        let Some(original) = original else { continue };
-
-        // Tags = explicit tags + folder memberships (as hierarchical tags).
-        let mut tags: Vec<String> = meta.tags.clone();
-        for fid in &meta.folders {
-            if let Some(path) = folder_paths.get(fid) {
-                tags.push(path.clone());
-            }
+        // 回收站里的条目仍在包里，不入库
+        if meta.is_deleted {
+            continue;
         }
 
-        // Notes: prefer annotation, fall back to note.
-        let notes = meta.annotation.clone().or(meta.note.clone()).filter(|s| !s.is_empty());
+        // Resolve the original file, using the recorded name/ext as a hint.
+        let Some(original) =
+            find_original_file(&item_dir, meta.name.as_deref(), meta.ext.as_deref())
+        else {
+            continue;
+        };
 
-        // Eagle star is 1-5; PixVault uses 0-5 where 0 = none. Keep as-is
-        // but treat missing as None.
-        let rating = meta.star.filter(|s| *s > 0);
+        let (tags, notes, rating, source) = map_meta(&meta, &folder_paths);
 
-        items.push(ImportItem {
-            path: original,
-            tags,
-            notes,
-            rating,
-            source: meta.url.clone().filter(|s| !s.is_empty()),
-        });
+        items.push(ImportItem { path: original, tags, notes, rating, source });
     }
 
     Ok(items)
 }
 
-/// Find the original media file inside an Eagle item subfolder.
-fn find_original_file(dir: &Path) -> Option<PathBuf> {
-    let mut best: Option<PathBuf> = None;
+/// 判断文件名是不是 Eagle 的附属文件（元数据 / 缩略图 / 网页快捷方式）。
+///
+/// 缩略图有**两种**命名，都真实存在过：`thumbnail.png` 与 `<原名>_thumbnail.png`。
+/// 老代码只跳过前缀式，后缀式的会被当成原图导进图库 —— 用户看到的是「每张图
+/// 都多出一条缩略图记录」。这里两种都认。
+pub(crate) fn is_sidecar_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    if lower == "metadata.json" || lower == ".ds_store" {
+        return true;
+    }
+    // 网页书签条目会附带 Windows / macOS 快捷方式
+    if lower.ends_with(".url") || lower.ends_with(".webloc") {
+        return true;
+    }
+    let stem = match lower.rsplit_once('.') {
+        Some((s, _)) => s,
+        None => lower.as_str(),
+    };
+    stem == "thumbnail" || stem.ends_with("_thumbnail")
+}
+
+/// 在 Eagle 条目目录里找出原始素材文件。
+///
+/// 目录里除原图外还有 metadata.json、缩略图和快捷方式。挑选顺序：① 文件名精确
+/// 等于 metadata 的 `name.ext` ② 同名任意扩展名 ③ 体积最大的那个。
+///
+/// 为什么不能像以前那样「取第一个非元数据文件就 break」：`read_dir` 的返回顺序
+/// 是文件系统给的，没有保证。同一份包在两台机器上可能选中不同的文件，取到缩略图
+/// 就是随机事故 —— 而且是那种「别人机器上正常、我这就糊」的玄学 bug。
+pub(crate) fn find_original_file(
+    dir: &Path,
+    name_hint: Option<&str>,
+    ext_hint: Option<&str>,
+) -> Option<PathBuf> {
+    let mut candidates: Vec<(PathBuf, u64)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name == "metadata.json" || name.starts_with("thumbnail") {
+            if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
                 continue;
             }
-            if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                best = Some(e.path());
-                break;
+            let file_name = e.file_name().to_string_lossy().to_string();
+            if is_sidecar_name(&file_name) {
+                continue;
             }
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            candidates.push((e.path(), size));
         }
     }
-    best
+    if candidates.is_empty() {
+        return None;
+    }
+
+    if let Some(hint) = name_hint.filter(|s| !s.is_empty()) {
+        if let Some(ext) = ext_hint.filter(|s| !s.is_empty()) {
+            let want = format!("{}.{}", hint, ext).to_lowercase();
+            if let Some((p, _)) = candidates.iter().find(|(p, _)| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase() == want)
+                    .unwrap_or(false)
+            }) {
+                return Some(p.clone());
+            }
+        }
+        let hint_lower = hint.to_lowercase();
+        if let Some((p, _)) = candidates.iter().find(|(p, _)| {
+            p.file_stem()
+                .map(|s| s.to_string_lossy().to_lowercase() == hint_lower)
+                .unwrap_or(false)
+        }) {
+            return Some(p.clone());
+        }
+    }
+
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.first().map(|(p, _)| p.clone())
 }
 
 // ───────────────────────── Pixcall ─────────────────────────

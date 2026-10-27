@@ -229,8 +229,21 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
     case "detect_library_kind":
       return "unknown" as unknown as T;
 
+    case "probe_eaglepack":
+      return {
+        layout: "pack",
+        item_count: 0,
+        folder_count: 0,
+        entry_count: 0,
+        unpacked_bytes: 0,
+      } as unknown as T;
+
+    case "cancel_eaglepack_import":
+      return null as unknown as T;
+
     case "import_eagle_library":
     case "import_pixcall_library":
+    case "import_eaglepack":
       return {
         kind: "eagle",
         detected: true,
@@ -427,7 +440,30 @@ export interface ImportSummary {
   imported_files: number;
   created_tags: number;
   errors: string[];
+  /** 仅 eaglepack：实际写盘的字节数 */
+  unpacked_bytes?: number;
+  /** 仅 eaglepack：跳过/失败的总数 */
+  skipped?: number;
   library: LibraryInfo;
+}
+
+/** `probe_eaglepack` 的返回：开包前的统计，只读中央目录，不解压。 */
+export interface PackProbe {
+  /** `pack`（pack.json + <ID>.info/）或 `library`（metadata.json + images/） */
+  layout: string;
+  item_count: number;
+  folder_count: number;
+  entry_count: number;
+  /** 解压后总大小（字节） */
+  unpacked_bytes: number;
+}
+
+/** `eaglepack-progress` 事件的载荷。 */
+export interface PackProgress {
+  phase: "unpack" | "parse";
+  done: number;
+  total: number;
+  current: string;
 }
 
 export interface SearchResult {
@@ -676,6 +712,17 @@ export const api = {
 
   importPixcallLibrary: (sourcePath: string) =>
     invoke<ImportSummary>("import_pixcall_library", { sourcePath }),
+
+  /** 只读 zip 中央目录，出统计（不解压）。 */
+  probeEaglepack: (packPath: string) =>
+    invoke<PackProbe>("probe_eaglepack", { packPath }),
+
+  /** 流式解压到 destDir，然后把 destDir 当作新图库打开。 */
+  importEaglepack: (packPath: string, destDir: string) =>
+    invoke<ImportSummary>("import_eaglepack", { packPath, destDir }),
+
+  cancelEaglepackImport: () =>
+    invoke<void>("cancel_eaglepack_import"),
 
   // Restore
   restoreLibraries: () =>

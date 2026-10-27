@@ -28,6 +28,11 @@ cp -r "$ROOT_DIR/src/." "$DEST/src/"
 # 后端源码
 cp -r "$ROOT_DIR/src-tauri/src/." "$DEST/src-tauri/src/"
 
+# 开发用示例（cargo run --example packcheck 验证 eaglepack 解包）。
+# 不进安装包，但不带过去的话在构建目录里根本编不出来。
+mkdir -p "$DEST/src-tauri/examples"
+cp -rf "$ROOT_DIR/src-tauri/examples/." "$DEST/src-tauri/examples/" 2>/dev/null || true
+
 # Cargo patch（[patch.crates-io] 依赖它，漏同步 → cargo 报
 # "unable to update patches/indexmap-1.9.3 / 系统找不到指定的路径"）
 cp -rf "$ROOT_DIR/patches/." "$DEST/patches/" 2>/dev/null || true

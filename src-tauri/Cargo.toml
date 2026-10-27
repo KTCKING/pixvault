@@ -1,6 +1,6 @@
 [package]
 name = "pixvault"
-version = "0.2.0"
+version = "0.3.0"
 description = "Resource-library style image management desktop app"
 authors = ["KTCKING"]
 edition = "2021"
@@ -40,6 +40,9 @@ regex = "1"
 opener = "0.7"
 rexif = "0.7"
 rayon = "1"
+# eaglepack 导入：只开 deflate。默认 features 会拉 bzip2 / zstd / aes（都是 C 依赖），
+# 在 Windows GNU 工具链上要 cc/make，没必要。Eagle 只用 store 与 deflate 两种方式。
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Patch indexmap to force has_std on Windows GNU target (autocfg probe fails)
 [patch.crates-io]
