@@ -388,6 +388,16 @@ export function Sidebar() {
                   }
                 }}
                 onMouseDown={(e) => handleMouseDown(e, index())}
+                // 右键必须在这里拦下来。不挂的话事件会冒泡到 <aside>，
+                // 弹出的是「新建库 / 打开已有库」那个空白区菜单 —— 库行上
+                // 想重命名或删除，只能在别的库菜单里找，等于没有。
+                onContextMenu={(e) => {
+                  ui.setContextMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    target: { kind: "library", libraryId: lib.id },
+                  });
+                }}
                 trailing={() => {
                   void library.closeLibrary(lib.id);
                 }}

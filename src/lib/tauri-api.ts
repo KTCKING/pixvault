@@ -517,8 +517,14 @@ export const api = {
   renameLibrary: (id: string, newName: string) =>
     invoke<void>("rename_library", { id, newName }),
 
-  deleteLibrary: (id: string, deleteFiles: boolean) =>
-    invoke<void>("delete_library", { id, deleteFiles }),
+  /**
+   * 删除库。`deleteFiles = false` 只从列表移除（磁盘原样保留）。
+   *
+   * `deleteFiles = true` 会 `remove_dir_all` 整个库根目录 —— 不进回收站。
+   * 后端要求 `confirmName` 与库名逐字相同才肯执行，多一道防止误删的闸。
+   */
+  deleteLibrary: (id: string, deleteFiles: boolean, confirmName?: string) =>
+    invoke<void>("delete_library", { id, deleteFiles, confirmName }),
 
   getLibraries: () =>
     invoke<LibraryInfo[]>("get_libraries"),

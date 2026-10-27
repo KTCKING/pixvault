@@ -311,56 +311,85 @@ export function ContextMenu() {
       ];
     }
 
-    // library menu
+    // library menu（右键侧栏「资源库」里的某一条）
+    const lib = library.libraries().find((l) => l.id === t.libraryId);
+    // 库刚被别处移除时（菜单还悬着）没有可操作对象，直接给空菜单。
+    if (!lib) return [];
+
+    /** 库从列表消失之后收拾现场：当前库没了就回到「所有图片」并重拉数据。 */
+    const afterLibraryGone = async (id: string) => {
+      const wasActive = library.activeLibraryId() === id;
+      library.setLibraries(library.libraries().filter((l) => l.id !== id));
+      if (!wasActive) return;
+      const next = library.libraries()[0];
+      library.setActiveLibraryId(next?.id ?? null);
+      if (!next) {
+        // 一个库都不剩了：把残留的列表清干净，别让已删库的图还挂在界面上。
+        files.setFiles([]);
+        files.setTotalFiles(0);
+        return;
+      }
+      // 视图可能正停在刚消失那个库的文件夹 / 标签上，回到「所有图片」最稳。
+      // 这几个 reload 失败也不该影响「删除成功」这个主结果，所以各自吞掉。
+      await files.setView({ kind: "all" }).catch(() => {});
+      await files.loadFolderTree().catch(() => {});
+      await tags.loadTags().catch(() => {});
+      void files.loadViewCounts().catch(() => {});
+    };
+
     const items: MenuItem[] = [
-      {
-        label: "在资源管理器中打开",
-        icon: <IconFolder size={15} />,
-        onClick: async () => {
-          const lib = library.libraries().find((l) => l.id === t.libraryId);
-          if (lib) await api.openInExplorer(lib.root_path);
-          close();
-        },
-      },
       {
         label: "重命名",
         icon: <IconPencil size={15} />,
         onClick: () => {
-          const lib = library.libraries().find((l) => l.id === t.libraryId);
           close();
-          if (!lib) return;
           ui.requestPrompt({
             title: "重命名库",
-            message: "输入新的库名称",
+            message: "只改图库里显示的名字，磁盘上的文件夹名不变。",
             defaultValue: lib.name,
             placeholder: "库名称",
-            confirmText: "重命名",
-            onSubmit: async (name) => {
-              const trimmed = name.trim();
-              if (!trimmed || trimmed === lib.name) return;
-              await api.renameLibrary(t.libraryId, trimmed);
-              library.setLibraries(
-                library.libraries().map((l) =>
-                  l.id === t.libraryId ? { ...l, name: trimmed } : l
-                )
-              );
-              ui.showToast("已重命名");
+            confirmText: "保存",
+            onSubmit: async (input) => {
+              const name = input.trim();
+              if (!name || name === lib.name) return;
+              if (/[/\\:*?"<>|]/.test(name)) {
+                ui.showToast('库名不能包含 \\ / : * ? " < > | 等字符', "error");
+                return;
+              }
+              try {
+                await api.renameLibrary(lib.id, name);
+                library.setLibraries(
+                  library.libraries().map((l) => (l.id === lib.id ? { ...l, name } : l))
+                );
+                ui.showToast(`已重命名为「${name}」`);
+              } catch (e) {
+                ui.showToast(typeof e === "string" ? e : "重命名失败", "error");
+              }
             },
           });
         },
       },
+      {
+        label: "在资源管理器中打开",
+        icon: <IconFolder size={15} />,
+        onClick: async () => {
+          await api.openInExplorer(lib.root_path);
+          close();
+        },
+      },
       { label: "", divider: true, onClick: () => {} },
       {
-        label: "移除库（保留文件）",
+        label: "从列表移除（文件保留）",
         icon: <IconLogOut size={15} />,
         onClick: async () => {
-          await api.deleteLibrary(t.libraryId, false);
-          library.setLibraries(library.libraries().filter((l) => l.id !== t.libraryId));
-          if (library.activeLibraryId() === t.libraryId) {
-            library.setActiveLibraryId(library.libraries()[0]?.id ?? null);
-          }
-          files.loadFiles(0);
           close();
+          try {
+            await api.deleteLibrary(lib.id, false);
+            await afterLibraryGone(lib.id);
+            ui.showToast("已从列表移除，文件仍在原处");
+          } catch (e) {
+            ui.showToast(typeof e === "string" ? e : "移除失败", "error");
+          }
         },
       },
       {
@@ -368,22 +397,32 @@ export function ContextMenu() {
         icon: <IconTrashX size={15} />,
         danger: true,
         onClick: () => {
-          const lib = library.libraries().find((l) => l.id === t.libraryId);
           close();
-          if (!lib) return;
-          ui.requestConfirm({
-            title: "删除库",
-            message: `确定要彻底删除库「${lib.name}」吗？\n\n这将永久删除该文件夹下的所有文件（含 .pixvault 数据），且无法恢复！`,
+          // 这一步删的是用户自己的文件夹，而且不进回收站 —— 一个「确定」
+          // 按钮扛不住手滑，要求逐字输入库名才执行（后端也会复核）。
+          ui.requestPrompt({
+            title: `删除库「${lib.name}」`,
+            message:
+              `会永久删除下面这个文件夹` +
+              (lib.file_count > 0 ? `连同里面的 ${lib.file_count} 个文件` : "") +
+              "，不进回收站、无法恢复：\n" +
+              `${lib.root_path}\n\n` +
+              "如果这是原地读取的 Eagle / Pixcall 库，删掉的就是你原本的素材目录。\n" +
+              `确认请原样输入库名「${lib.name}」；只想让它从列表消失，请改用「从列表移除」。`,
+            placeholder: "输入库名以确认",
             confirmText: "永久删除",
-            danger: true,
-            onConfirm: async () => {
-              await api.deleteLibrary(t.libraryId, true);
-              library.setLibraries(library.libraries().filter((l) => l.id !== t.libraryId));
-              if (library.activeLibraryId() === t.libraryId) {
-                library.setActiveLibraryId(library.libraries()[0]?.id ?? null);
+            onSubmit: async (input) => {
+              if (input.trim() !== lib.name) {
+                ui.showToast("库名不匹配，已取消", "error");
+                return;
               }
-              files.loadFiles(0);
-              ui.showToast("库已删除");
+              try {
+                await api.deleteLibrary(lib.id, true, lib.name);
+                await afterLibraryGone(lib.id);
+                ui.showToast(`已删除库「${lib.name}」及其文件`);
+              } catch (e) {
+                ui.showToast(typeof e === "string" ? e : "删除失败", "error");
+              }
             },
           });
         },

@@ -132,6 +132,14 @@ pub async fn rename_library(
     if name.is_empty() {
         return Err("库名称不能为空".to_string());
     }
+    // 与 create_library 用同一套字符表。虽然名字不落到磁盘（文件夹名不变），
+    // 但库名会被写进 libraries.json，路径分隔符混进去后面排查会很痛苦。
+    if name
+        .chars()
+        .any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    {
+        return Err("库名称不能包含 \\ / : * ? \" < > | 等字符".to_string());
+    }
     let engine = state.engine.lock().unwrap();
     let lib = engine.get_library(&id).ok_or("未找到图库")?;
     let mut lib = lib.lock().unwrap();
@@ -144,29 +152,133 @@ pub async fn rename_library(
 /// Permanently delete a library. When `delete_files` is true the on-disk files
 /// (and the `.pixvault` metadata folder) are also removed from disk. When false
 /// the library is only closed and forgotten by the app.
+///
+/// `delete_files` 走的是 `remove_dir_all`，不可逆也不进回收站，所以除了前端
+/// 那个要手打库名的弹窗，这里再复核一次 `confirm_name`，并过一道 `ensure_deletable`
+/// 的路径闸。
 #[tauri::command]
 pub async fn delete_library(
     id: String,
     delete_files: bool,
+    confirm_name: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let root_path = {
-        let mut engine = state.engine.lock().unwrap();
+    // 先把目标定位清楚。校验失败就直接返回，库仍留在列表里 —— 不能出现
+    // 「删到一半失败、入口却已经没了」这种状态。
+    let (root_path, name, is_network) = {
+        let engine = state.engine.lock().unwrap();
         let lib = engine.get_library(&id).ok_or("未找到图库")?;
-        let root = lib.lock().unwrap().root_path.clone();
-        engine.close_library(&id);
-        save_libraries_config(&engine);
-        root
+        let lib = lib.lock().unwrap();
+        (lib.root_path.clone(), lib.name.clone(), lib.is_network)
     };
 
     if delete_files {
-        if root_path.exists() {
-            std::fs::remove_dir_all(&root_path)
-                .map_err(|e| format!("删除文件夹失败: {e}"))?;
+        if confirm_name.as_deref().map(str::trim) != Some(name.as_str()) {
+            return Err("库名不匹配，已取消删除".to_string());
         }
+        ensure_deletable(&root_path, is_network)?;
+    }
+
+    {
+        let mut engine = state.engine.lock().unwrap();
+        engine.close_library(&id);
+        save_libraries_config(&engine);
+    }
+    // 与 close_library 命令一致：别在侧边栏留一个永远不动的进度环。
+    state.thumbs.forget_warm(&id);
+
+    if delete_files && root_path.exists() {
+        std::fs::remove_dir_all(&root_path).map_err(|e| {
+            format!(
+                "库已从列表移除，但文件夹没删干净：{e}\n可能还有程序占用着 {}，关掉之后手动删除即可。",
+                root_path.display()
+            )
+        })?;
     }
 
     Ok(())
+}
+
+/// 删除库目录前的路径闸。这个操作不可逆、不进回收站，宁可多拦几次。
+///
+/// 拦三类：磁盘根 / 用户主目录及其常见子目录 / 里面没有 `.pixvault` 的目录
+/// （说明它不是本应用建出来的库根，而是库根的上级或用户随手选的目录）。
+fn ensure_deletable(root: &std::path::Path, is_network: bool) -> Result<(), String> {
+    if !root.exists() {
+        // 磁盘上本来就不在了，当成「从列表移除」处理即可，不必拦。
+        return Ok(());
+    }
+    if !root.is_dir() {
+        return Err(format!("库根不是文件夹，已拒绝删除：{}", root.display()));
+    }
+
+    // 盘根不删。注意别用 `components().count() < 2` 来判断 —— Windows 上
+    // `C:\` 是 [Prefix, RootDir] 两个组件，count 正好是 2，那条判断会放行
+    // 整个磁盘（这个 bug 是单元测试抓出来的）。看有没有实际目录名才准。
+    let named = root
+        .components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .count();
+    if named == 0 {
+        return Err(format!(
+            "拒绝删除磁盘根目录（{}）——请把图库放在一个单独的文件夹里",
+            root.display()
+        ));
+    }
+    // `\\server\share` 是共享根（Prefix + RootDir + 1 个 Normal），删它等于
+    // 清空整个网络共享，同样不干。
+    if is_network && named <= 1 {
+        return Err(format!(
+            "拒绝删除网络共享根目录（{}）——请指向共享下的某个具体文件夹",
+            root.display()
+        ));
+    }
+
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if is_sensitive_dir(&canonical) {
+        return Err(format!(
+            "{} 是用户主目录或系统目录，删除它会把桌面 / 文档一起带走，已拒绝。\n请把图库放在单独的子文件夹里（比如 D:\\图库\\我的素材）",
+            root.display()
+        ));
+    }
+
+    // 本地库根下一定有 `.pixvault`（open_library 建的）。网络库的元数据存在
+    // %APPDATA%/libraries/<id>，所以跳过这项。
+    if !is_network && !crate::utils::winattr::metadata_dir(root).is_dir() {
+        return Err(format!(
+            "{} 里没有 .pixvault 元数据，看起来不是图库根目录，已拒绝删除",
+            root.display()
+        ));
+    }
+
+    Ok(())
+}
+
+/// 用户主目录本身，以及它下面那些「删了就出大事」的目录。
+fn is_sensitive_dir(canonical: &std::path::Path) -> bool {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .map(std::path::PathBuf::from);
+
+    if let Some(home) = home {
+        let mut guards = vec![home.clone()];
+        // 中文 Windows 下资源管理器显示的是「桌面」「文档」等，但真实目录名
+        // 仍是这些英文名，所以按英文名挡。
+        for sub in [
+            "Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos",
+            "AppData", "Library", "Movies",
+        ] {
+            guards.push(home.join(sub));
+        }
+        for g in guards {
+            if g.canonicalize().map(|c| c == canonical).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 #[tauri::command]
@@ -468,4 +580,72 @@ fn reindex_in_background(
 
     let lib = lib.lock().unwrap();
     crate::commands::files::enqueue_missing_thumbnails(thumbs, &lib, library_id, false);
+}
+#[cfg(test)]
+mod delete_guard_tests {
+    //! `ensure_deletable` 是「删除库及所有文件」前面唯一的机械闸 —— 前端那个
+    //! 输库名的弹窗挡不住程序 bug，这里必须自己站得住。
+    use super::ensure_deletable;
+
+    /// 造一个空目录（先清掉上次残留）。
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pixvault-guard-{}", tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn refuses_volume_root() {
+        let root = if cfg!(windows) {
+            std::path::Path::new("C://")
+        } else {
+            std::path::Path::new("/")
+        };
+        let err = ensure_deletable(root, false).unwrap_err();
+        assert!(err.contains("磁盘根目录"), "实际错误: {}", err);
+    }
+
+    #[test]
+    fn refuses_folder_without_metadata() {
+        let dir = scratch("plain");
+        // 本地库根下一定有 .pixvault；没有就说明这不是库根，不能删。
+        let err = ensure_deletable(&dir, false).unwrap_err();
+        assert!(err.contains(".pixvault"), "实际错误: {}", err);
+
+        // 建出元数据目录后应当放行。
+        std::fs::create_dir_all(dir.join(".pixvault")).unwrap();
+        assert!(ensure_deletable(&dir, false).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn network_library_skips_metadata_check() {
+        let dir = scratch("network");
+        // 网络库的元数据在 %APPDATA%/libraries/<id>，库根下没有 .pixvault。
+        assert!(ensure_deletable(&dir, true).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_home_directory() {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap();
+        let home = std::path::PathBuf::from(home);
+        if !home.is_dir() {
+            return;
+        }
+        let err = ensure_deletable(&home, true).unwrap_err();
+        assert!(err.contains("用户主目录"), "实际错误: {}", err);
+    }
+
+    #[test]
+    fn missing_path_is_treated_as_already_gone() {
+        let dir = std::env::temp_dir().join("pixvault-guard-not-there");
+        let _ = std::fs::remove_dir_all(&dir);
+        // 磁盘上本来就没有 → 不该拦住「从列表移除」。
+        assert!(ensure_deletable(&dir, false).is_ok());
+    }
 }
