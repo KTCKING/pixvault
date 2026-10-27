@@ -376,11 +376,16 @@ export function SettingsModal(props: Props) {
                 <span>
                   {p().phase === "parse"
                     ? "正在解析元数据…"
-                    : `正在解压 ${p().done} / ${p().total}`}
+                    : p().phase === "organize"
+                      ? `正在按文件夹重组 ${p().done} / ${p().total}`
+                      : `正在解压 ${p().done} / ${p().total}`}
                 </span>
-                <button class="btn-ghost text-xs px-2 py-0.5" onClick={cancelPack}>
-                  取消
-                </button>
+                {/* 重组阶段搬的是同一卷上的文件，几毫秒一个，没有可停的点 */}
+                <Show when={p().phase !== "organize"}>
+                  <button class="btn-ghost text-xs px-2 py-0.5" onClick={cancelPack}>
+                    取消
+                  </button>
+                </Show>
               </div>
               <div class="h-1.5 rounded-full overflow-hidden" style={{ background: s.tertiary }}>
                 <div
@@ -416,6 +421,12 @@ export function SettingsModal(props: Props) {
             <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1" style={{ color: s.secondary }}>
               <span>文件 {result()!.imported_files} / {result()!.total_items}</span>
               <span>新建标签 {result()!.created_tags}</span>
+              <Show when={(result()!.reorganized ?? 0) > 0}>
+                <span>按文件夹重组 {result()!.reorganized}</span>
+              </Show>
+              <Show when={(result()!.renamed ?? 0) > 0}>
+                <span>重名改名 {result()!.renamed}</span>
+              </Show>
               <Show when={(result()!.skipped ?? 0) > 0}>
                 <span>跳过 {result()!.skipped}</span>
               </Show>
@@ -429,7 +440,9 @@ export function SettingsModal(props: Props) {
         <div class="text-xs mt-5 leading-relaxed" style={{ color: s.muted }}>
           导入会新建一个独立的图片库（以源库命名），不会与当前库的图片合并。Eagle 库与 Pixcall
           库是原地读取，不复制文件；<span style={{ color: s.secondary }}>eaglepack 不同</span>
-          ——包里的素材必须解压到硬盘上，所以会让你先选一个空文件夹，它就成为新图库的根，之后随时可以删掉那个文件夹。
+          ——包里的素材必须解压到硬盘上，所以会让你先选一个空文件夹，它就成为新图库的根，之后随时可以删掉那个文件夹。解压出来的文件会
+          <span style={{ color: s.secondary }}>按 Eagle 里的文件夹层级摆好</span>
+          ，&lt;条目ID&gt;.info 这类壳目录直接清掉，同名文件自动加 (2) 序号。
         </div>
       </div>
     </div>

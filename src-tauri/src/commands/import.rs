@@ -21,6 +21,12 @@ pub struct ImportSummary {
     pub unpacked_bytes: u64,
     #[serde(default)]
     pub skipped: usize,
+    /// 按 Eagle 文件夹层级重组落盘的文件数（仅 eaglepack）
+    #[serde(default)]
+    pub reorganized: usize,
+    /// 因同名被自动加上 `(2)` 序号的个数（仅 eaglepack）
+    #[serde(default)]
+    pub renamed: usize,
     /// The newly-created (or reused) target library.
     pub library: crate::commands::library::LibraryInfo,
 }
@@ -150,13 +156,17 @@ pub async fn import_eaglepack(
     );
 
     let dest_for_parse = dest.clone();
-    let (items, parse_report) =
-        tauri::async_runtime::spawn_blocking(move || eaglepack::collect_items(&dest_for_parse))
-            .await
-            .map_err(|e| format!("解析素材包失败: {}", e))?
-            .map_err(|e| {
-                format!("{}（文件已解压到 {}，你可以直接把它当普通文件夹打开）", e, dest_dir)
-            })?;
+    let app_for_org = app.clone();
+    let (items, parse_report, flatten) = tauri::async_runtime::spawn_blocking(move || {
+        eaglepack::import_pack(&dest_for_parse, |p| {
+            let _ = app_for_org.emit("eaglepack-progress", p);
+        })
+    })
+    .await
+    .map_err(|e| format!("解析素材包失败: {}", e))?
+    .map_err(|e| {
+        format!("{}（文件已解压到 {}，你可以直接把它当普通文件夹打开）", e, dest_dir)
+    })?;
 
     // 库名优先用「用户刚选的那个目标目录名」——那才是他在资源管理器里看到的、
     // 下次还要找回来的名字。退回包文件名 stem（很多网上下来的包叫 Untitled.eaglepack，
@@ -173,6 +183,8 @@ pub async fn import_eaglepack(
     summary.unpacked_bytes = report.bytes;
     summary.skipped =
         report.skipped + parse_report.skipped_deleted + parse_report.skipped_bookmark + parse_report.skipped_missing;
+    summary.reorganized = flatten.moved;
+    summary.renamed = flatten.renamed;
 
     if parse_report.skipped_deleted > 0 {
         summary
@@ -183,6 +195,12 @@ pub async fn import_eaglepack(
         summary.errors.push(format!(
             "已跳过 {} 个网页书签条目（只有链接和缩略图，没有原文件）",
             parse_report.skipped_bookmark
+        ));
+    }
+    if flatten.failed > 0 {
+        summary.errors.push(format!(
+            "{} 个文件没能按文件夹重组，已保留在原位置导入（图没有丢）",
+            flatten.failed
         ));
     }
 
@@ -310,6 +328,8 @@ async fn finish_import(
         errors,
         unpacked_bytes: 0,
         skipped: 0,
+        reorganized: 0,
+        renamed: 0,
         library,
     })
 }

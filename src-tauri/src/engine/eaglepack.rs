@@ -24,7 +24,7 @@
 //! 解压出来的目录**直接就是新图库的根**（与现有 Eagle / Pixcall 导入语义一致，
 //! 零复制），所以必须解到用户选的持久目录，不能解到 temp。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::import::{
-    find_original_file, folder_path_map, import_eagle, map_meta, EagleFolder, EagleItemMeta,
+    find_original_file, folder_path_map, map_meta, EagleFolder, EagleItemMeta, EagleRoot,
     ImportItem,
 };
 
@@ -335,65 +335,463 @@ pub fn detect_layout(root: &Path) -> Option<(Layout, PathBuf)> {
     None
 }
 
-/// 在一个解开的包里收集所有可导入条目。
+// ───────────────────────── 落盘重组 ─────────────────────────
+//
+// Eagle 的文件夹是**虚拟**的：磁盘上所有素材扁平地躺在 `<ID>.info/` 里，归属关系
+// 只记在条目自己的 `folders: [id]`。所以在 Eagle 里看起来是 `素材/图标/a.png`，
+// 硬盘上却是 `MVQ55RU1NL8GV.info/photo.png`。
+//
+// 素材包是我们自己解出来的副本（源包不动），所以这里可以真的重组：把文件按
+// Eagle 里的文件夹层级搬到 `素材/图标/a.png`，然后把 `<ID>.info/` 壳整个删掉。
+// 结果是「软件里怎么显示，硬盘上就怎么放」。
+//
+// 注意**只有素材包这么做**。原地读取的 Eagle 库（Import Eagle Library）不能动 ——
+// 那是用户已有的库，重组之后 Eagle 自己就打不开了。
+
+/// 重组结果。
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct FlattenReport {
+    /// 成功按文件夹层级落盘的文件数
+    pub moved: usize,
+    /// 因重名被自动加上 `(2)`/`(3)` 的文件数
+    pub renamed: usize,
+    /// 搬运失败的文件数（仍按原路径入库，图不会丢）
+    pub failed: usize,
+    /// 清掉的目录数：`<ID>.info` 壳、`images/`、包外多套的那层文件夹
+    pub removed_dirs: usize,
+}
+
+/// 一条还没落盘的素材。
+struct RawItem {
+    /// 解包后它现在躺在哪
+    file: PathBuf,
+    /// Eagle 声明的文件夹路径（`父/子`），`None` = 库根
+    folder: Option<String>,
+    /// 期望的文件名（含扩展名，尚未清洗）
+    name: String,
+    tags: Vec<String>,
+    notes: Option<String>,
+    rating: Option<i32>,
+    source: Option<String>,
+}
+
+enum Skip {
+    /// 回收站里的条目，包内仍保留
+    Deleted,
+    /// 只有网页链接和缩略图，没有原文件（Eagle 的书签）
+    Bookmark,
+    /// 元数据在但找不到原图，或者解析不了
+    Missing,
+}
+
+/// 解析 + 重组 + 清理，一步到位。
 ///
-/// Library 布局直接复用 `import_eagle`（磁盘结构完全一样）；Pack 布局以
-/// `pack.json` 的 `images` 数组为准 —— 它是包内唯一的完整清单，而 `<ID>.info/`
-/// 目录里那份 metadata.json 是它的副本（缺目录时可以用副本兜底，见 `load_item_meta`）。
-pub fn collect_items(root: &Path) -> Result<(Vec<ImportItem>, ParseReport), String> {
+/// 返回的 `ImportItem.path` 已经是**重组之后**的位置，直接拿去写库即可；
+/// 调用方不需要再扫一遍目录。
+pub fn import_pack<F>(
+    root: &Path,
+    mut on_progress: F,
+) -> Result<(Vec<ImportItem>, ParseReport, FlattenReport), String>
+where
+    F: FnMut(&PackProgress),
+{
+    let (real, raw, parse_report) = parse_raw(root)?;
+    let total = raw.len() as u64;
+
+    // 包外常套一层文件夹（`旧库.library/…`）。先把 Eagle 自己的记账文件提到库根，
+    // 那层壳才能跟着一起清掉，侧栏不会剩一个只装着 metadata.json 的目录。
+    lift_metadata_files(&real, root);
+
+    let mut out: Vec<ImportItem> = Vec::with_capacity(raw.len());
+    let mut report = FlattenReport::default();
+    let mut used: HashSet<String> = HashSet::new();
+    // 我们自己建的文件夹目录，清理阶段不能当成素材壳删掉
+    let mut our_dirs: HashSet<PathBuf> = HashSet::new();
+
+    for (i, item) in raw.into_iter().enumerate() {
+        let dir = folder_segments(item.folder.as_deref())
+            .iter()
+            .fold(root.to_path_buf(), |acc, seg| acc.join(seg));
+
+        // Windows 单条路径上限 260 字符，留出库根与文件名的余量后按剩余预算截断
+        let budget = 240usize.saturating_sub(dir.to_string_lossy().chars().count() + 1);
+        let name = clip_name(&item.name, budget.clamp(24, 120));
+
+        let (target, renamed) = unique_target(&dir, &name, &mut used);
+        if renamed {
+            report.renamed += 1;
+        }
+
+        let ok = std::fs::create_dir_all(&dir).is_ok() && move_file(&item.file, &target).is_ok();
+        our_dirs.insert(dir);
+
+        // 搬运失败就按原路径入库：图还在，只是位置没变漂亮
+        let (path, failed) = if ok {
+            report.moved += 1;
+            (target, false)
+        } else {
+            report.failed += 1;
+            (item.file, true)
+        };
+        if failed {
+            tracing::warn!("eaglepack 重组失败，保留原路径: {}", path.display());
+        }
+
+        out.push(ImportItem {
+            path,
+            tags: item.tags,
+            notes: item.notes,
+            rating: item.rating,
+            source: item.source,
+        });
+
+        let done = i as u64 + 1;
+        if done % 64 == 0 || done == total {
+            on_progress(&PackProgress {
+                phase: "organize",
+                done,
+                total,
+                current: String::new(),
+            });
+        }
+    }
+
+    report.removed_dirs = purge_item_dirs(root, &our_dirs) + remove_empty_dirs(root);
+    Ok((out, parse_report, report))
+}
+
+/// 按布局解析出「待落盘清单」。两条布局的差别只在元数据从哪来。
+fn parse_raw(root: &Path) -> Result<(PathBuf, Vec<RawItem>, ParseReport), String> {
     let Some((layout, real)) = detect_layout(root) else {
         return Err(
-            "这个包里既没有 pack.json，也没有 Eagle 库的 metadata.json + images 目录，无法识别".to_string(),
+            "这个包里既没有 pack.json，也没有 Eagle 库的 metadata.json + images 目录，无法识别"
+                .to_string(),
         );
     };
 
     match layout {
-        Layout::Library => {
-            let items = import_eagle(&real)?;
-            let n = items.len();
-            Ok((
-                items,
-                ParseReport { items: n, ..Default::default() },
-            ))
-        }
+        // 包内唯一的完整清单是 pack.json 的 images 数组；`<ID>.info/metadata.json`
+        // 是它的副本，只在缺目录时兜底
         Layout::Pack => {
             let raw = std::fs::read_to_string(real.join("pack.json"))
                 .map_err(|e| format!("读取 pack.json 失败: {}", e))?;
-            let header: PackHeader = serde_json::from_str(&raw)
-                .map_err(|e| format!("解析 pack.json 失败: {}", e))?;
+            let header: PackHeader =
+                serde_json::from_str(&raw).map_err(|e| format!("解析 pack.json 失败: {}", e))?;
 
             let folder_paths = folder_path_map(&header.folders);
             let mut report = ParseReport::default();
             let mut items = Vec::new();
 
             for meta in &header.images {
-                if meta.is_deleted {
-                    report.skipped_deleted += 1;
+                let dir = meta
+                    .id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|id| item_dir(&real, id));
+                let Some(dir) = dir else {
+                    report.skipped_missing += 1;
                     continue;
+                };
+                match raw_from_meta(meta, &dir, &folder_paths) {
+                    Ok(item) => items.push(item),
+                    Err(Skip::Deleted) => report.skipped_deleted += 1,
+                    Err(Skip::Bookmark) => report.skipped_bookmark += 1,
+                    Err(Skip::Missing) => report.skipped_missing += 1,
                 }
-                let Some(id) = meta.id.as_deref().filter(|s| !s.is_empty()) else {
-                    report.skipped_missing += 1;
-                    continue;
-                };
-                let Some(dir) = item_dir(&real, id) else {
-                    report.skipped_missing += 1;
-                    continue;
-                };
-                let Some(original) =
-                    find_original_file(&dir, meta.name.as_deref(), meta.ext.as_deref())
-                else {
-                    // 没有原文件的条目是 Eagle 的网页书签，只有缩略图，跳过
-                    report.skipped_bookmark += 1;
-                    continue;
-                };
-                let (tags, notes, rating, source) = map_meta(meta, &folder_paths);
-                items.push(ImportItem { path: original, tags, notes, rating, source });
             }
 
             report.items = items.len();
-            Ok((items, report))
+            Ok((real, items, report))
+        }
+        // 库布局：元数据分散在 `images/<ID>.info/metadata.json`，库头只有文件夹树
+        Layout::Library => {
+            let raw = std::fs::read_to_string(real.join("metadata.json"))
+                .map_err(|e| format!("读取 metadata.json 失败: {}", e))?;
+            let header: EagleRoot = serde_json::from_str(&raw)
+                .map_err(|e| format!("解析 Eagle metadata.json 失败: {}", e))?;
+
+            let folder_paths = folder_path_map(&header.folders);
+            let mut report = ParseReport::default();
+            let mut items = Vec::new();
+
+            let images = real.join("images");
+            for entry in std::fs::read_dir(&images)
+                .map_err(|e| format!("读取 images 目录失败: {}", e))?
+                .flatten()
+            {
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let dir = entry.path();
+                let Ok(json) = std::fs::read_to_string(dir.join("metadata.json")) else {
+                    report.skipped_missing += 1;
+                    continue;
+                };
+                let Ok(meta) = serde_json::from_str::<EagleItemMeta>(&json) else {
+                    report.skipped_missing += 1;
+                    continue;
+                };
+                match raw_from_meta(&meta, &dir, &folder_paths) {
+                    Ok(item) => items.push(item),
+                    Err(Skip::Deleted) => report.skipped_deleted += 1,
+                    Err(Skip::Bookmark) => report.skipped_bookmark += 1,
+                    Err(Skip::Missing) => report.skipped_missing += 1,
+                }
+            }
+
+            report.items = items.len();
+            Ok((real, items, report))
         }
     }
+}
+
+fn raw_from_meta(
+    meta: &EagleItemMeta,
+    dir: &Path,
+    folder_paths: &HashMap<String, String>,
+) -> Result<RawItem, Skip> {
+    if meta.is_deleted {
+        return Err(Skip::Deleted);
+    }
+    let Some(file) = find_original_file(dir, meta.name.as_deref(), meta.ext.as_deref()) else {
+        // 带链接没原文件 = Eagle 的书签条目；连链接都没有就是包本身不完整
+        let has_url = meta.url.as_deref().map(|u| !u.trim().is_empty()).unwrap_or(false);
+        return Err(if has_url { Skip::Bookmark } else { Skip::Missing });
+    };
+    let (tags, notes, rating, source) = map_meta(meta, folder_paths);
+    Ok(RawItem {
+        name: target_file_name(meta, &file),
+        folder: primary_folder(meta, folder_paths),
+        file,
+        tags,
+        notes,
+        rating,
+        source,
+    })
+}
+
+/// Eagle 允许一条素材同时属于多个文件夹，但磁盘上一个文件只能落在一个位置：
+/// 取第一个还在树里的文件夹。其余归属关系照样全部进标签（`map_meta` 是全量追加的），
+/// 所以「这张图也属于另一个文件夹」这条信息没丢。
+fn primary_folder(
+    meta: &EagleItemMeta,
+    folder_paths: &HashMap<String, String>,
+) -> Option<String> {
+    meta.folders
+        .iter()
+        .filter_map(|id| folder_paths.get(id))
+        .find(|p| !p.trim().is_empty())
+        .cloned()
+}
+
+/// 目标文件名：优先用 Eagle 记的 `name` + `ext`，退回磁盘上的文件名。
+///
+/// **名字必须清洗**：素材名来自用户的原始文件，`设计稿：终稿.png` 里那个全角冒号
+/// 没问题，但 ASCII 的 `:` `*` `?` 在 Windows 上根本建不出来，不清洗就整个搬运失败。
+fn target_file_name(meta: &EagleItemMeta, file: &Path) -> String {
+    let disk_ext = file.extension().map(|e| e.to_string_lossy().to_string());
+    let ext = meta
+        .ext
+        .clone()
+        .filter(|e| !e.trim().is_empty())
+        .or(disk_ext)
+        .map(|e| e.trim_start_matches('.').to_string())
+        .filter(|e| !e.is_empty());
+    let stem = meta
+        .name
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| file.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "未命名".to_string());
+
+    match ext {
+        // name 里偶尔已经带了扩展名（第三方工具导出的包会这样），别拼成 a.jpg.jpg
+        Some(e) if stem.to_lowercase().ends_with(&format!(".{}", e.to_lowercase())) => {
+            let (s, _) = split_name(&stem);
+            format!("{}.{}", sanitize_segment(&s), e)
+        }
+        Some(e) => format!("{}.{}", sanitize_segment(&stem), e),
+        None => sanitize_segment(&stem),
+    }
+}
+
+/// `父/子` 拆成清洗过的目录名。空段丢掉，别造出空目录。
+fn folder_segments(folder: Option<&str>) -> Vec<String> {
+    match folder {
+        None => Vec::new(),
+        Some(p) => p
+            .split('/')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(sanitize_segment)
+            .collect(),
+    }
+}
+
+/// 清洗成 Windows / macOS / Linux 都能落盘的名字。
+///
+/// Windows 的规矩最多：`< > : " / \ | ? *` 与 0x00-0x1F 非法，名字不能以点或
+/// 空格结尾，`CON`/`PRN`/`COM1` 这类保留名建不出来。素材名字来自用户文件，
+/// 中文素材包里有 `设计稿：终稿.png` 这种很常见，不清洗就会整个导入失败。
+fn sanitize_segment(raw: &str) -> String {
+    const BAD: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    let s: String = raw
+        .chars()
+        .map(|c| {
+            if BAD.contains(&c) || (c as u32) < 0x20 {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let s = s.trim_matches(|c: char| c.is_whitespace() || c == '.');
+    if s.is_empty() {
+        return "未命名".to_string();
+    }
+    let mut out = s.to_string();
+    if is_reserved_name(&out) {
+        out.insert(0, '_');
+    }
+    out
+}
+
+fn is_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim().to_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit())
+}
+
+/// `name.ext` → (stem, ".ext")。没有扩展名时后半段是空串。
+fn split_name(name: &str) -> (String, String) {
+    match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() && !e.is_empty() && e.chars().count() <= 12 => {
+            (s.to_string(), format!(".{}", e))
+        }
+        _ => (name.to_string(), String::new()),
+    }
+}
+
+/// 超长名字截断，但**保住扩展名** —— 否则图片会变成没后缀的文件，索引器认不出来。
+fn clip_name(name: &str, max_chars: usize) -> String {
+    if name.chars().count() <= max_chars {
+        return name.to_string();
+    }
+    let (stem, ext) = split_name(name);
+    let keep = max_chars.saturating_sub(ext.chars().count());
+    let clipped: String = stem.chars().take(keep).collect();
+    let clipped = clipped.trim_end_matches(['.', ' ']);
+    format!("{}{}", clipped, ext)
+}
+
+/// 同目录同名时加序号：`a.png` → `a (2).png`。Eagle 里重名很常见
+/// （不同素材可以叫同一个名字），直接搬过去会覆盖掉一张。
+fn unique_target(dir: &Path, name: &str, used: &mut HashSet<String>) -> (PathBuf, bool) {
+    let (stem, ext) = split_name(name);
+    for n in 1..=9999usize {
+        let candidate = if n == 1 {
+            format!("{}{}", stem, ext)
+        } else {
+            format!("{} ({}){}", stem, n, ext)
+        };
+        let path = dir.join(&candidate);
+        // 大小写不敏感地判重：Windows 上 a.png 和 A.png 是同一个文件
+        let key = path.to_string_lossy().to_lowercase();
+        if used.contains(&key) || path.exists() {
+            continue;
+        }
+        used.insert(key);
+        return (path, n > 1);
+    }
+    let fallback = dir.join(format!("{}-{}{}", stem, used.len(), ext));
+    used.insert(fallback.to_string_lossy().to_lowercase());
+    (fallback, true)
+}
+
+/// 搬文件。同一卷上 `rename` 是原子的、不复制数据；跨卷（目标在别的盘）或被杀软
+/// 短暂占用时退回「复制 + 删除」。
+fn move_file(from: &Path, to: &Path) -> io::Result<()> {
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(from, to)?;
+    std::fs::remove_file(from)
+}
+
+/// 把 Eagle 的记账文件提到库根，这样包外那层包装目录才能清掉。
+/// 这些文件不是图片，不会被索引，也不会出现在网格里。
+fn lift_metadata_files(real: &Path, dest: &Path) {
+    if real == dest {
+        return;
+    }
+    for name in ["metadata.json", "mtime.json", "pack.json", "tags.json"] {
+        let src = real.join(name);
+        if !src.is_file() {
+            continue;
+        }
+        let target = dest.join(name);
+        if target.exists() {
+            continue;
+        }
+        let _ = std::fs::rename(&src, &target);
+    }
+}
+
+/// 删掉 `<ID>.info` 素材壳（搬完只剩缩略图和元数据副本，内容已进库）。
+///
+/// 只删名字以 `.info` 结尾的目录，且跳过我们自己建的文件夹目录 —— 万一真有人
+/// 把 Eagle 文件夹起名叫 `设计稿.info`，不至于连图和目录一起删掉。
+fn purge_item_dirs(root: &Path, our_dirs: &HashSet<PathBuf>) -> usize {
+    fn walk(dir: &Path, ours: &HashSet<PathBuf>, count: &mut usize) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let children: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        for p in children {
+            if !p.is_dir() {
+                continue;
+            }
+            if ours.contains(&p) {
+                // 我们建的目录：继续往里走，但自己不删
+                walk(&p, ours, count);
+                continue;
+            }
+            let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if name.ends_with(".info") {
+                if std::fs::remove_dir_all(&p).is_ok() {
+                    *count += 1;
+                }
+            } else {
+                walk(&p, ours, count);
+            }
+        }
+    }
+    let mut count = 0;
+    walk(root, our_dirs, &mut count);
+    count
+}
+
+/// 自底向上删空目录（`images/`、包外包装目录都会在这一步消失）。
+fn remove_empty_dirs(root: &Path) -> usize {
+    fn walk(dir: &Path, count: &mut usize) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let children: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        for p in children {
+            if !p.is_dir() {
+                continue;
+            }
+            walk(&p, count);
+            let empty = std::fs::read_dir(&p)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false);
+            if empty && std::fs::remove_dir(&p).is_ok() {
+                *count += 1;
+            }
+        }
+    }
+    let mut count = 0;
+    walk(root, &mut count);
+    count
 }
 
 /// 条目目录可能落在三个位置，都见过：zip 根、`info/` 下、`images/` 下。

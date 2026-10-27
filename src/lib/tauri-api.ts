@@ -444,6 +444,10 @@ export interface ImportSummary {
   unpacked_bytes?: number;
   /** 仅 eaglepack：跳过/失败的总数 */
   skipped?: number;
+  /** 仅 eaglepack：按 Eagle 文件夹层级重组落盘的文件数 */
+  reorganized?: number;
+  /** 仅 eaglepack：因同名被自动加上 `(2)` 序号的个数 */
+  renamed?: number;
   library: LibraryInfo;
 }
 
@@ -460,7 +464,8 @@ export interface PackProbe {
 
 /** `eaglepack-progress` 事件的载荷。 */
 export interface PackProgress {
-  phase: "unpack" | "parse";
+  /** `unpack` 解压中 / `parse` 解析元数据 / `organize` 按文件夹重组落盘 */
+  phase: "unpack" | "parse" | "organize";
   done: number;
   total: number;
   current: string;
