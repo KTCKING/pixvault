@@ -1,10 +1,12 @@
 /**
  * PixVault 网页摘取 —— 页面侧
  *
- * 干三件事：
+ * 干四件事：
  *  1. 扫描当前页面所有能存的图片 / 视频（含 srcset、懒加载属性、背景图）；
- *  2. 提供一个采集面板（Alt+S 或点扩展图标）让人勾选；
- *  3. 悬停在图片上时右上角浮一个采集按钮，一键存单张。
+ *  2. 提供一个采集面板（Alt+S 或点扩展图标）让人勾选，并且**顺手选好文件夹和标签**；
+ *  3. 悬停在图片上时右上角浮一个采集按钮，一键存单张；
+ *  4. 在 iframe 里也跑（manifest 的 `all_frames`）：画廊页把图塞在 iframe 里的站点
+ *     不少，但**面板只在顶层文档出现** —— 300×250 的广告 iframe 里冒出个面板最难受。
  *
  * 面板整体放在 Shadow DOM 里：页面的 CSS 再野也影响不到它，它也不往外漏样式。
  */
@@ -13,20 +15,44 @@
   if (window.__pixvaultLoaded) return;
   window.__pixvaultLoaded = true;
 
-  const MEDIA_RE = /\.(jpe?g|png|gif|webp|avif|bmp|svg|tiff?|ico|heic|mp4|m4v|webm|mov|mkv|avi|wmv|flv|ogv|mpg|mpeg)(\?|#|$)/i;
-  const VIDEO_RE = /\.(mp4|m4v|webm|mov|mkv|avi|wmv|flv|ogv|mpg|mpeg)(\?|#|$)/i;
+  /** 顶层文档才建面板；跨域 iframe 里访问 `window.top` 只会拿到 null，不会抛。 */
+  const IS_TOP = (() => {
+    try {
+      return window.top === window;
+    } catch {
+      return false;
+    }
+  })();
 
-  let config = {
+  const MEDIA_RE = /\.(jpe?g|png|gif|webp|avif|bmp|svg|tiff?|ico|heic|mp4|m4v|webm|mov|mkv|avi|wmv|flv|ogv|mpg|mpeg)(\?|#|$)/i;
+
+  const CONFIG_DEFAULTS = {
     minSize: 64,
     hoverButton: true,
     includeVideo: true,
+    /** 关掉「按站点建文件夹」时用这个固定子文件夹 */
+    folderBySite: true,
+    folder: "",
+    /** 上次用的存放位置：`@auto` = 按站点自动，`""` = 库根，其它 = 相对库根的路径 */
+    pickFolder: "@auto",
+    /** 上次用的标签，逗号分隔 */
+    pickTags: [],
   };
+
+  let config = { ...CONFIG_DEFAULTS };
 
   /** 面板 UI 状态 */
   let media = [];
   let selected = new Set();
   let busy = false;
   let panelOpen = false;
+  /** 本帧发起过几次「悬停单张保存」——用来判断后台的 done 消息该不该在这里弹提示 */
+  let hoverPending = 0;
+  /** 库里的文件夹 / 标签（从应用侧拉） */
+  let meta = { folders: [], tags: [], ok: false, error: "", siteFolder: "" };
+  let pickFolder = "@auto";
+  /** 新建文件夹时用户手打的、还没进 meta 的那一条 */
+  let draftFolder = "";
 
   // ───────────────────────── 扫描 ─────────────────────────
 
@@ -151,6 +177,24 @@
     return list;
   }
 
+  /**
+   * 把「本帧 + 所有子帧」的素材合成一份。
+   *
+   * 页面内的 iframe 有自己的 document，顶层脚本看不见里面的 `<img>`；所以扫描这件事
+   * 每个帧自己干，后台按 frameId 收集再合并（dedupe 靠 URL）。
+   */
+  async function scanAll() {
+    if (IS_TOP) {
+      try {
+        const r = await chrome.runtime.sendMessage({ type: "pixvault:scan-all" });
+        if (r && Array.isArray(r.items)) return r.items;
+      } catch {
+        /* 后台没响应（刚重载）就退回本帧扫描 */
+      }
+    }
+    return collectMedia().map((it) => ({ ...it, frameId: 0 }));
+  }
+
   // ───────────────────────── UI ─────────────────────────
 
   const host = document.createElement("div");
@@ -186,7 +230,38 @@
   .chip:hover { background:rgba(255,255,255,0.1); color:#fff; }
   .hint { margin-left:auto; font-size:11px; color:rgba(255,255,255,0.5); }
   .hint b { color:#ffb066; font-variant-numeric: tabular-nums; }
-  .grid { overflow-y:auto; padding:4px 10px 10px; display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+
+  /* 存放位置：文件夹 + 标签 */
+  .dest { padding: 2px 13px 10px; display:flex; flex-direction:column; gap:6px;
+          border-bottom:1px solid rgba(255,255,255,0.06); }
+  .row { display:flex; align-items:center; gap:7px; }
+  .lab { font-size:11px; color:rgba(255,255,255,0.45); width:30px; flex:0 0 auto; }
+  .sel, .tagin, .newin {
+    flex:1; min-width:0; height:26px; border-radius:7px; font-size:11.5px; padding:0 8px; outline:none;
+    background:rgba(255,255,255,0.07); color:#eee; border:1px solid rgba(255,255,255,0.14);
+  }
+  .sel { -webkit-appearance:none; appearance:none; cursor:pointer; padding-right:20px;
+         background-image:linear-gradient(45deg,transparent 50%,rgba(255,255,255,0.55) 50%),
+                          linear-gradient(135deg,rgba(255,255,255,0.55) 50%,transparent 50%);
+         background-position:calc(100% - 11px) 11px, calc(100% - 7px) 11px;
+         background-size:4px 4px, 4px 4px; background-repeat:no-repeat; }
+  .sel option { background:#1e1e21; color:#eee; }
+  .sel:focus, .tagin:focus, .newin:focus { border-color:rgba(255,176,102,0.65); }
+  .tagin::placeholder, .newin::placeholder { color:rgba(255,255,255,0.3); }
+  .newin { display:none; }
+  .newin.on { display:block; }
+  .plus { width:26px; height:26px; flex:0 0 auto; border-radius:7px; cursor:pointer; font-size:14px; line-height:1;
+          border:1px solid rgba(255,255,255,0.14); background:transparent; color:rgba(255,255,255,0.7); }
+  .plus:hover { background:rgba(255,255,255,0.1); color:#fff; }
+  .chips { display:flex; flex-wrap:wrap; gap:5px; padding-left:37px; max-height:56px; overflow-y:auto; }
+  .chips:empty { display:none; }
+  .desthint { font-size:10.5px; color:#ff9a72; padding-left:37px; display:none; }
+  .tagchip { font-size:10.5px; padding:2px 7px; border-radius:999px; cursor:pointer; background:transparent;
+             border:1px solid rgba(255,255,255,0.16); color:rgba(255,255,255,0.66); }
+  .tagchip:hover { background:rgba(255,255,255,0.1); color:#fff; }
+  .tagchip.on { background:rgba(255,176,102,0.16); border-color:rgba(255,176,102,0.55); color:#ffcf9e; }
+
+  .grid { overflow-y:auto; padding:8px 10px 10px; display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
   .grid::-webkit-scrollbar { width:8px; }
   .grid::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.16); border-radius:4px; }
   .card { position:relative; aspect-ratio:1/1; border-radius:8px; overflow:hidden; cursor:pointer;
@@ -205,12 +280,16 @@
   .card .vplay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
   .card .vplay::after { content:""; width:0; height:0; border-left:11px solid rgba(255,255,255,0.9);
                         border-top:7px solid transparent; border-bottom:7px solid transparent; }
-  .empty { padding:26px 12px; text-align:center; font-size:12px; color:rgba(255,255,255,0.45); }
+  .empty { padding:26px 12px; text-align:center; font-size:12px; color:rgba(255,255,255,0.45); grid-column:1/-1; }
   .foot { padding:10px 13px 12px; border-top:1px solid rgba(255,255,255,0.08); display:flex; gap:8px; align-items:center; }
   .save { flex:1; height:32px; border:0; border-radius:9px; cursor:pointer; font-size:12.5px; font-weight:600;
           background:linear-gradient(180deg,#fff,#d9d9de); color:#141416; }
   .save:disabled { opacity:.45; cursor:default; }
   .save:not(:disabled):hover { filter:brightness(1.05); }
+  .retry { height:32px; padding:0 11px; border-radius:9px; cursor:pointer; font-size:12px;
+           border:1px solid rgba(255,255,255,0.2); background:transparent; color:#eee; display:none; }
+  .retry:hover { background:rgba(255,255,255,0.1); }
+  .retry.on { display:block; }
   .foot .status { font-size:11px; color:rgba(255,255,255,0.55); min-width:0; }
   .hover {
     position: fixed; width:26px; height:26px; border-radius:8px; display:none; align-items:center; justify-content:center;
@@ -248,8 +327,127 @@
     return n;
   }
 
+  // ───────────────────────── 标签 / 存放位置 ─────────────────────────
+
+  /** 逗号（中英文都认）、顿号、竖线分隔；去 `#`、去重、最多 12 个 —— 和后端同一套规则。 */
+  function parseTagInput(raw) {
+    const out = [];
+    const seen = new Set();
+    for (const piece of String(raw || "").split(/[,，、|]/)) {
+      const name = piece.trim().replace(/^#+/, "").trim().slice(0, 40);
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(name);
+      if (out.length >= 12) break;
+    }
+    return out;
+  }
+
+  /** 面板没开过时（悬停按钮直接存）用缓存下来的那组标签。 */
+  function currentTags() {
+    const input = panel && panel.__parts.tagInput;
+    return parseTagInput(input ? input.value : (config.pickTags || []).join(","));
+  }
+
+  function persistChoice() {
+    try {
+      chrome.storage.local.set({ pickFolder, pickTags: currentTags() });
+    } catch {
+      /* 扩展上下文失效（比如刚被重载）就下次再说 */
+    }
+  }
+
+  async function syncMeta() {
+    try {
+      const r = await chrome.runtime.sendMessage({
+        type: "pixvault:meta",
+        pageUrl: location.href,
+      });
+      if (r && r.ok) {
+        meta = {
+          folders: r.folders || [],
+          tags: r.tags || [],
+          siteFolder: r.siteFolder || "",
+          ok: true,
+          error: "",
+        };
+      } else {
+        meta = { folders: [], tags: [], siteFolder: "", ok: false, error: (r && r.error) || "未连接" };
+      }
+    } catch (e) {
+      meta = { folders: [], tags: [], siteFolder: "", ok: false, error: String(e) };
+    }
+    renderDest();
+  }
+
+  function optionEl(value, label) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = label;
+    return o;
+  }
+
+  function renderDest() {
+    if (!panel) return;
+    const { sel, chips, tagInput, destHint } = panel.__parts;
+
+    // ── 文件夹下拉 ──
+    const autoTarget = config.folderBySite ? meta.siteFolder || "按站点" : config.folder || "库根";
+    sel.innerHTML = "";
+    sel.appendChild(optionEl("@auto", `自动：${autoTarget}`));
+    sel.appendChild(optionEl("", "库根目录"));
+    const known = meta.folders || [];
+    if (pickFolder && pickFolder !== "@auto" && pickFolder !== "" && !known.includes(pickFolder)) {
+      sel.appendChild(optionEl(pickFolder, `${pickFolder}（新建）`));
+    }
+    for (const f of known) sel.appendChild(optionEl(f, f));
+    // 选中的值不在列表里（库被换了 / 文件夹被删了）就回到「自动」
+    sel.value = pickFolder;
+    if (sel.value !== pickFolder) {
+      pickFolder = "@auto";
+      sel.value = "@auto";
+    }
+    destHint.textContent = meta.ok ? "" : "库未连接，只能先存到默认位置";
+    destHint.style.display = meta.ok ? "none" : "block";
+
+    // ── 标签 chips ──
+    chips.innerHTML = "";
+    const active = parseTagInput(tagInput.value);
+    const shown = known && (meta.tags || []).slice(0, 24);
+    for (const t of shown) {
+      const b = el("button", "tagchip", t);
+      b.dataset.tag = t.toLowerCase();
+      if (active.some((x) => x.toLowerCase() === t.toLowerCase())) b.classList.add("on");
+      b.addEventListener("click", (e) => {
+        e.preventDefault();
+        const now = parseTagInput(tagInput.value);
+        const hit = now.findIndex((x) => x.toLowerCase() === t.toLowerCase());
+        if (hit >= 0) now.splice(hit, 1);
+        else now.push(t);
+        tagInput.value = now.join(", ");
+        renderChips();
+        persistChoice();
+      });
+      chips.appendChild(b);
+    }
+  }
+
+  function renderChips() {
+    if (!panel) return;
+    const { chips, tagInput } = panel.__parts;
+    const active = parseTagInput(tagInput.value).map((x) => x.toLowerCase());
+    for (const b of chips.children) {
+      if (!b.dataset.tag) continue;
+      b.classList.toggle("on", active.includes(b.dataset.tag));
+    }
+  }
+
+  // ───────────────────────── 面板 ─────────────────────────
+
   function buildPanel() {
-    const panel = el("div", "panel");
+    const panelEl = el("div", "panel");
 
     const head = el("div", "head");
     head.appendChild(el("div", "logo"));
@@ -260,7 +458,7 @@
     const close = el("button", "x", "×");
     close.addEventListener("click", () => togglePanel(false));
     head.appendChild(close);
-    panel.appendChild(head);
+    panelEl.appendChild(head);
 
     const bar = el("div", "bar");
     const mk = (label, fn) => {
@@ -278,21 +476,92 @@
     }));
     const hint = el("div", "hint");
     bar.appendChild(hint);
-    panel.appendChild(bar);
+    panelEl.appendChild(bar);
+
+    // ── 存放位置 ──
+    const dest = el("div", "dest");
+    const rowF = el("div", "row");
+    rowF.appendChild(el("div", "lab", "文件夹"));
+    const sel = el("select", "sel");
+    sel.addEventListener("change", () => {
+      pickFolder = sel.value;
+      persistChoice();
+    });
+    rowF.appendChild(sel);
+    const plus = el("button", "plus", "＋");
+    plus.title = "新建文件夹（可写多级，如 2026/风景）";
+    rowF.appendChild(plus);
+    dest.appendChild(rowF);
+
+    const newin = el("input", "newin");
+    newin.placeholder = "新文件夹名，回车确认；多级用 / 分隔";
+    dest.appendChild(newin);
+
+    const rowT = el("div", "row");
+    rowT.appendChild(el("div", "lab", "标签"));
+    const tagInput = el("input", "tagin");
+    tagInput.placeholder = "标签，逗号分隔（可留空）";
+    tagInput.value = (config.pickTags || []).join(", ");
+    tagInput.addEventListener("input", () => renderChips());
+    tagInput.addEventListener("change", persistChoice);
+    tagInput.addEventListener("blur", persistChoice);
+    rowT.appendChild(tagInput);
+    dest.appendChild(rowT);
+
+    const chips = el("div", "chips");
+    dest.appendChild(chips);
+    const destHint = el("div", "desthint");
+    dest.appendChild(destHint);
+    panelEl.appendChild(dest);
+
+    plus.addEventListener("click", () => {
+      const on = newin.classList.toggle("on");
+      if (on) {
+        newin.value = draftFolder;
+        newin.focus();
+      }
+    });
+    const commitNew = () => {
+      const name = newin.value.trim().replace(/^\/+|\/+$/g, "");
+      if (!name) {
+        newin.classList.remove("on");
+        return;
+      }
+      // 只是把路径塞进 pickFolder：后端写盘时会 create_dir_all，不存在的目录自然建出来
+      draftFolder = name;
+      pickFolder = name;
+      newin.classList.remove("on");
+      renderDest();
+      persistChoice();
+    };
+    newin.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commitNew();
+      } else if (e.key === "Escape") {
+        newin.classList.remove("on");
+        newin.blur();
+      }
+      e.stopPropagation();
+    });
+    newin.addEventListener("blur", commitNew);
 
     const grid = el("div", "grid");
-    panel.appendChild(grid);
+    panelEl.appendChild(grid);
 
     const foot = el("div", "foot");
     const save = el("button", "save", "保存到 PixVault");
     save.addEventListener("click", doSave);
-    const status = el("div", "status", "");
     foot.appendChild(save);
+    const retry = el("button", "retry", "重试");
+    retry.addEventListener("click", doRetry);
+    foot.appendChild(retry);
+    const status = el("div", "status", "");
     foot.appendChild(status);
-    panel.appendChild(foot);
+    panelEl.appendChild(foot);
 
-    panel.__parts = { count, grid, hint, save, status };
-    return panel;
+    panelEl.__parts = { count, grid, hint, save, status, sel, chips, tagInput, newin, destHint, retry };
+    return panelEl;
   }
 
   let panel = null;
@@ -304,16 +573,20 @@
     if (open && !panel) {
       panel = buildPanel();
       shadow.appendChild(panel);
-      rescan();
+      void rescan();
+      void syncMeta();
     } else if (panel) {
       panel.style.display = open ? "flex" : "none";
-      if (open) rescan();
+      if (open) {
+        void rescan();
+        void syncMeta();
+      }
     }
     if (!open) hideHover();
   }
 
-  function rescan() {
-    media = collectMedia();
+  async function rescan() {
+    media = await scanAll();
     // 丢掉已经不在页面上的选中项
     const alive = new Set(media.map((m) => m.url));
     selected = new Set([...selected].filter((u) => alive.has(u)));
@@ -390,10 +663,11 @@
     if (busy || selected.size === 0) return;
     busy = true;
     updateSaveBtn();
-    const items = media.filter((m) => selected.has(m.url)).map((m) => ({
-      url: m.url,
-      name: m.name,
-    }));
+    const { status, retry } = panel.__parts;
+    retry.classList.remove("on");
+    const items = media
+      .filter((m) => selected.has(m.url))
+      .map((m) => ({ url: m.url, name: m.name, frameId: m.frameId || 0 }));
 
     let resp;
     try {
@@ -401,6 +675,8 @@
         type: "pixvault:save",
         items,
         pageUrl: location.href,
+        folder: pickFolder,
+        tags: currentTags(),
       });
     } catch (e) {
       resp = { started: false, error: String(e) };
@@ -412,15 +688,39 @@
       showToast(`保存失败：${(resp && resp.error) || "后台没有响应"}`);
       return;
     }
-    if (panel) panel.__parts.status.textContent = `0/${items.length}`;
+    status.textContent = `0/${items.length}`;
+  }
+
+  async function doRetry() {
+    if (busy) return;
+    let resp;
+    try {
+      resp = await chrome.runtime.sendMessage({ type: "pixvault:retry-failed" });
+    } catch (e) {
+      resp = { started: false, error: String(e) };
+    }
+    if (!resp || !resp.started) {
+      showToast(`没有可重试的项目：${(resp && resp.error) || ""}`);
+      return;
+    }
+    busy = true;
+    updateSaveBtn();
+    panel.__parts.retry.classList.remove("on");
+    panel.__parts.status.textContent = `0/${resp.total}`;
   }
 
   function onProgress(msg) {
     if (!panel || !busy) return;
-    panel.__parts.status.textContent = `${msg.current}/${msg.total}`;
+    const text = `${msg.current}/${msg.total}`;
+    panel.__parts.status.textContent = msg.retrying ? `${text} · 重试中` : text;
   }
 
   function onDone(msg) {
+    // 后台的 done 是广播给整个标签页所有帧的；只有本帧发起的那批才在这里收尾。
+    const mine = busy || hoverPending > 0;
+    if (hoverPending > 0) hoverPending -= 1;
+    if (!mine) return;
+
     busy = false;
     if (panel) {
       updateSaveBtn();
@@ -432,9 +732,11 @@
         selected.clear();
         renderGrid();
       }
+      void syncMeta(); // 新文件夹 / 新标签要出现在下拉里
     } else {
       showToast(`保存完成：成功 ${msg.ok} 项，失败 ${msg.fail} 项`, 5000);
       console.warn("[PixVault] 失败明细", msg.errors);
+      if (panel && msg.ok + msg.fail > 1) panel.__parts.retry.classList.add("on");
     }
   }
 
@@ -510,13 +812,17 @@
     const item = { ...hoverUrl };
     hideHover();
     showToast(`正在保存 ${item.name} …`, 1600);
+    hoverPending += 1;
     try {
       await chrome.runtime.sendMessage({
         type: "pixvault:save",
         items: [item],
         pageUrl: location.href,
+        folder: pickFolder,
+        tags: currentTags(),
       });
     } catch (err) {
+      hoverPending = Math.max(0, hoverPending - 1);
       showToast(`保存失败：${String(err)}`);
     }
   });
@@ -530,9 +836,10 @@
       if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "s" || e.key === "S")) {
         e.preventDefault();
         e.stopPropagation();
-        togglePanel();
+        if (IS_TOP) togglePanel();
+        else chrome.runtime.sendMessage({ type: "pixvault:open-panel" }).catch(() => {});
       }
-      if (e.key === "Escape" && panelOpen) {
+      if (e.key === "Escape" && panelOpen && IS_TOP) {
         togglePanel(false);
       }
     },
@@ -568,9 +875,20 @@
       return true;
     }
 
+    // 后台点名要这一帧的素材（顶层帧汇总时逐帧问）
+    if (msg.type === "pixvault:scan") {
+      sendResponse({ items: collectMedia() });
+      return true;
+    }
+
     if (msg.type === "pixvault:toggle-panel") {
+      if (!IS_TOP) {
+        // 广播会给到每一个帧；子帧帮不上忙，安静地应一声就好
+        sendResponse({ open: false, frame: true });
+        return true;
+      }
       togglePanel(true);
-      sendResponse({ open: true, found: media.length });
+      sendResponse({ open: true });
       return true;
     }
 
@@ -583,14 +901,29 @@
       return;
     }
     if (msg.type === "pixvault:config-changed") {
-      chrome.storage.local.get({ minSize: 64, hoverButton: true, includeVideo: true }).then((c) => {
+      chrome.storage.local.get(CONFIG_DEFAULTS).then((c) => {
         config = c;
+        if (panel) renderDest();
       });
       return;
     }
   });
 
-  chrome.storage.local.get({ minSize: 64, hoverButton: true, includeVideo: true }).then((c) => {
+  // 注册到后台的「活着的帧」表里：顶层帧汇总扫描结果时按这张表逐帧问。
+  try {
+    chrome.runtime
+      .sendMessage({ type: "pixvault:hello", pageUrl: location.href })
+      .catch(() => {});
+  } catch {
+    /* 老版 Chrome 的 sendMessage 不返回 Promise */
+  }
+
+  chrome.storage.local.get(CONFIG_DEFAULTS).then((c) => {
     config = c;
+    pickFolder = typeof c.pickFolder === "string" ? c.pickFolder : "@auto";
+    if (panel) {
+      panel.__parts.tagInput.value = (c.pickTags || []).join(", ");
+      renderDest();
+    }
   });
 })();

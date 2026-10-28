@@ -56,8 +56,10 @@ cp -f "$ROOT_DIR/src-tauri/tauri.conf.json" \
 rm -rf "$DEST/src-tauri/capabilities"
 cp -r "$ROOT_DIR/src-tauri/capabilities" "$DEST/src-tauri/"
 
-rm -rf "$DEST/src-tauri/icons"
-cp -r "$ROOT_DIR/src-tauri/icons" "$DEST/src-tauri/"
+# 图标是「源 → 构建」单向覆盖，文件名固定（tauri icon 生成的那一套），
+# 所以不需要先删目录 —— 而 `rm -rf` 超过 50 个文件会触发安全删除拦截，
+# 整个同步脚本会静默中止（后面的 package.json / vite 配置就都同步不到）。
+cp -rf "$ROOT_DIR/src-tauri/icons/." "$DEST/src-tauri/icons/"
 
 # 脚本、包配置、说明
 # 注意：目录要带 -r —— 之前用 `cp -f`，cp 会以 "omitting directory" 失败，

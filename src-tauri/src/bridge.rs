@@ -321,6 +321,24 @@ impl Request {
         }
         None
     }
+
+    /// 同名参数可能出现多次（`?tag=a&tag=b`），这个版本把它们全收上来。
+    fn query_all(&self, key: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for pair in self.query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (k, v) = match pair.split_once('=') {
+                Some((k, v)) => (k, v),
+                None => (pair, ""),
+            };
+            if url_decode(k) == key {
+                out.push(url_decode(v));
+            }
+        }
+        out
+    }
 }
 
 struct Response {
@@ -586,6 +604,9 @@ fn route(req: &Request, app: &AppHandle, bridge: &Arc<Bridge>) -> Response {
                 }),
             )
         }
+        // 采集面板的「存放」下拉：库里已有的文件夹 + 已经有过的标签，都从这里取。
+        // 面板在网页上下文里，直接 fetch 127.0.0.1 会被页面 CSP 拦，所以只走后台代理。
+        ("GET", "/api/meta") | ("GET", "/api/folders") => meta(app),
         ("POST", "/api/ingest") => ingest(req, app, bridge),
         _ => Response::json(
             404,
@@ -618,6 +639,135 @@ fn current_library(app: &AppHandle) -> (Option<serde_json::Value>, Option<String
     )
 }
 
+// ───────────────────────── 库内已有文件夹 / 标签 ─────────────────────────
+
+/// 给采集面板用的「存放位置」清单。
+///
+/// 只列出相对库根的目录名，最多扫 [MAX_FOLDER_DEPTH] 层、[MAX_FOLDERS] 条 ——
+/// 面板是个下拉框，不是文件管理器；几千条既滚不动也没人挑得完。
+fn meta(app: &AppHandle) -> Response {
+    let (lib_name, root, tags) = {
+        let state = app.state::<crate::AppState>();
+        let engine = match state.engine.lock() {
+            Ok(e) => e,
+            Err(_) => {
+                return Response::json(
+                    500,
+                    serde_json::json!({ "ok": false, "error": "应用状态锁失效" }),
+                )
+            }
+        };
+        let Some(arc) = engine.active_library() else {
+            return Response::json(
+                409,
+                serde_json::json!({ "ok": false, "error": "PixVault 里还没有打开图库" }),
+            );
+        };
+        let lib = match arc.lock() {
+            Ok(l) => l,
+            Err(_) => {
+                return Response::json(
+                    500,
+                    serde_json::json!({ "ok": false, "error": "图库锁失效" }),
+                )
+            }
+        };
+        let tags: Vec<String> = lib
+            .db
+            .get_all_tags()
+            .map(|v| v.into_iter().map(|t| t.name).take(MAX_TAGS).collect())
+            .unwrap_or_default();
+        (lib.name.clone(), lib.root_path.clone(), tags)
+    };
+    // 锁在这里已经放掉：扫盘可能要几百毫秒，不能一边扫一边顶着图库锁。
+    let folders = collect_folders(&root);
+
+    Response::json(
+        200,
+        serde_json::json!({
+            "ok": true,
+            "library": { "name": lib_name, "root_path": root.to_string_lossy() },
+            "folders": folders,
+            "tags": tags,
+        }),
+    )
+}
+
+const MAX_FOLDER_DEPTH: usize = 3;
+const MAX_FOLDERS: usize = 400;
+const MAX_TAGS: usize = 300;
+
+/// 扫出库根下的子目录（相对路径，`/` 分隔）。跳过点开头的目录与元数据目录。
+fn collect_folders(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if !root.is_dir() {
+        return out;
+    }
+    let meta_name = crate::utils::winattr::metadata_dir(root)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string());
+    for entry in walkdir::WalkDir::new(root)
+        .min_depth(1)
+        .max_depth(MAX_FOLDER_DEPTH)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        // 点开头的目录（含元数据目录）整枝剪掉：`filter_entry` 会连子树一起跳过，
+        // 否则光 `.pixvault/thumbnails` 就有上万条，白扫。
+        .filter_entry(move |e| {
+            let name = e.file_name().to_string_lossy();
+            let name: &str = &name;
+            !(name.starts_with('.') || Some(name) == meta_name.as_deref())
+        })
+        .filter_map(|e| e.ok())
+    {
+        if out.len() >= MAX_FOLDERS {
+            break;
+        }
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(root) {
+            Ok(p) => p.to_string_lossy().replace('\\', "/"),
+            Err(_) => continue,
+        };
+        out.push(rel);
+    }
+    out
+}
+
+/// `?tags=猫,狗` / `?tag=猫&tag=狗` / `?tags=猫，狗` 都认。
+/// 逐个清洗：去 `#`、去空白、截断到 40 字、按小写去重、最多 [MAX_TAG_INPUT] 个。
+fn parse_tags(req: &Request) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for raw in req
+        .query_all("tags")
+        .into_iter()
+        .chain(req.query_all("tag"))
+    {
+        for piece in raw.split([',', '，', '、', '|']) {
+            let name = piece.trim().trim_start_matches('#').trim();
+            if name.is_empty() {
+                continue;
+            }
+            let name = truncate_chars(name, 40);
+            let key = name.to_lowercase();
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            out.push(name);
+            if out.len() >= MAX_TAG_INPUT {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+const MAX_TAG_INPUT: usize = 12;
+
 // ───────────────────────── 落盘 + 入库 ─────────────────────────
 
 fn ingest(req: &Request, app: &AppHandle, bridge: &Arc<Bridge>) -> Response {
@@ -633,6 +783,7 @@ fn ingest(req: &Request, app: &AppHandle, bridge: &Arc<Bridge>) -> Response {
         .or_else(|| req.header("referer").map(|s| s.to_string()))
         .unwrap_or_default();
     let folder = req.query_get("folder").unwrap_or_default();
+    let tags = parse_tags(req);
     let mime = req
         .header("content-type")
         .unwrap_or("application/octet-stream")
@@ -762,6 +913,16 @@ fn ingest(req: &Request, app: &AppHandle, bridge: &Arc<Bridge>) -> Response {
                 .db
                 .update_file_notes(&path_str, &format!("来源：{page}"));
         }
+        // 采集时勾的标签：名字不存在就现建一个（`a/b` 会自动补齐父级）。
+        if !tags.is_empty() {
+            if let Ok(Some(row)) = lib.db.get_file_by_path(&path_str) {
+                for name in &tags {
+                    if let Ok(tag_id) = lib.db.get_or_create_tag(name) {
+                        let _ = lib.db.add_file_tag(row.id, tag_id);
+                    }
+                }
+            }
+        }
 
         // 视频不进缩略图队列：解码器不认，硬排只会白占线程。
         if !is_video {
@@ -804,6 +965,8 @@ fn ingest(req: &Request, app: &AppHandle, bridge: &Arc<Bridge>) -> Response {
             "filename": final_name,
             "size": size,
             "video": is_video,
+            "folder": folder,
+            "tags": tags,
         }),
     )
 }
@@ -1040,5 +1203,53 @@ mod tests {
         let p = unique_path(&dir, "a.jpg");
         assert_eq!(p.file_name().unwrap().to_string_lossy(), "a (2).jpg");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn req_with_query(query: &str) -> Request {
+        Request {
+            method: "POST".to_string(),
+            path: "/api/ingest".to_string(),
+            query: query.to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn tags_accept_comma_repeat_and_hash() {
+        // 逗号分隔（URL 编码的 `,`）+ 重复参数 + `#` 前缀 + 全角逗号
+        assert_eq!(
+            parse_tags(&req_with_query("tags=%E7%8C%AB%2C%E7%8B%97&tag=%E7%8C%AB")),
+            vec!["猫", "狗"]
+        );
+        assert_eq!(parse_tags(&req_with_query("tags=%23cat")), vec!["cat"]);
+        assert_eq!(
+            parse_tags(&req_with_query("tags=a%EF%BC%8Cb")),
+            vec!["a", "b"]
+        );
+        assert!(parse_tags(&req_with_query("")).is_empty());
+    }
+
+    #[test]
+    fn tags_are_deduped_and_capped() {
+        let mut q = String::new();
+        for i in 0..20 {
+            q.push_str(&format!("tag=t{i}&"));
+        }
+        assert_eq!(parse_tags(&req_with_query(&q)).len(), MAX_TAG_INPUT);
+        // 大小写不敏感去重：Cat 已经存在就不再收 cat
+        assert_eq!(parse_tags(&req_with_query("tag=Cat&tag=cat")), vec!["Cat"]);
+    }
+
+    #[test]
+    fn folders_skip_hidden_and_metadata_trees() {
+        let root = std::env::temp_dir().join(format!("pv-folders-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("art").join("风景")).unwrap();
+        std::fs::create_dir_all(root.join("photos")).unwrap();
+        std::fs::create_dir_all(root.join(".pixvault").join("thumbnails")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let out = collect_folders(&root);
+        assert_eq!(out, vec!["art", "art/风景", "photos"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

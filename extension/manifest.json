@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PixVault 网页摘取",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "把网页上的图片和视频一键保存到 PixVault 图库（配合 PixVault 桌面应用使用）",
   "permissions": ["storage", "contextMenus", "scripting"],
   "host_permissions": ["<all_urls>"],
@@ -30,7 +30,7 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle",
-      "all_frames": false
+      "all_frames": true
     }
   ]
 }
