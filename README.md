@@ -273,6 +273,8 @@ Eagle 的缩略图叫 `thumbnail.png`，叫 `<原名>_thumbnail.png` 的也真�
 
 ## 技术架构
 
+> 完整的功能清单、模块地图、桥接协议和数据模型见 [**docs/ARCHITECTURE.md**](docs/ARCHITECTURE.md)。
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ 前端 SolidJS（src/）                                          │
