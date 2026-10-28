@@ -1,4 +1,4 @@
-import { createSignal, createEffect, For, onMount, onCleanup, Show } from "solid-js";
+import { createSignal, createEffect, untrack, For, onMount, onCleanup, Show } from "solid-js";
 import { useLibraryStore, activeLibraryId } from "@/stores/library";
 import { useFilesStore } from "@/stores/files";
 import { useTagsStore } from "@/stores/tags";
@@ -49,15 +49,30 @@ export default function App() {
   /** 顶部「当前库」切换下拉是否展开。 */
   const [libMenuOpen, setLibMenuOpen] = createSignal(false);
 
-  /** 切换 / 打开库后重置视图并重载全部库相关数据（侧边栏计数、文件夹树、标签、网格）。 */
+  /**
+   * 切换 / 打开库后重置视图并重载全部库相关数据（侧边栏计数、文件夹树、标签、网格）。
+   *
+   * 这个 effect 只能依赖「当前库 id」，绝不能依赖 `currentView`：
+   * `setView` 的同步段会读到 `currentView()`，若在 effect 里裸调用，点击侧边栏
+   * 智能视图会让本 effect 重跑、立刻把视图重置回「所有图片」——表现为点了没反应。
+   * 因此内部全部包进 untrack，并用 lastLibraryId 做「真的换库才重载」的守卫。
+   */
+  let lastLibraryId: string | null = null;
   createEffect(() => {
     const id = activeLibraryId();
-    if (!id) return;
-    files.setCurrentSort({ by: "mtime", order: "DESC" });
-    void files.setView({ kind: "all" });
-    void tags.loadTags();
-    void files.loadFolderTree();
-    void files.loadViewCounts();
+    if (!id) {
+      lastLibraryId = null;
+      return;
+    }
+    if (id === lastLibraryId) return;
+    lastLibraryId = id;
+    untrack(() => {
+      files.setCurrentSort({ by: "mtime", order: "DESC" });
+      void files.setView({ kind: "all" });
+      void tags.loadTags();
+      void files.loadFolderTree();
+      void files.loadViewCounts();
+    });
   });
 
   /** Toggle the right-hand info / preview panel. When re-opening it prefers

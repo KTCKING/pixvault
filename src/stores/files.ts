@@ -39,12 +39,19 @@ export function useFilesStore() {
     }
   };
 
-  const loadFiles = async (offset = 0) => {
+  /**
+   * 加载当前视图的文件。
+   *
+   * `view` 允许显式传入，避免在 `setView` 里又回头读 `currentView()` signal：
+   * 一旦有 effect 通过 setView 间接触发 loadFiles，读 signal 会让该 effect
+   * 意外订阅「当前视图」，进而在切换视图时自我重置。
+   */
+  const loadFiles = async (offset = 0, view: ViewState = currentView()) => {
     const libId = activeLibraryId();
     if (!libId) return;
 
     // 回收站是独立的数据通道。
-    if (currentView().kind === "trash") {
+    if (view.kind === "trash") {
       await loadDeletedFiles();
       return;
     }
@@ -55,7 +62,7 @@ export function useFilesStore() {
     }
     setIsLoading(true);
     try {
-      const q = queryForView(currentView(), currentSort());
+      const q = queryForView(view, currentSort());
       const result = await api.getFiles(
         libId,
         offset,
@@ -93,7 +100,7 @@ export function useFilesStore() {
       rated: { by: "rating", order: "DESC" },
     };
     if (defaultSort[view.kind]) setCurrentSort(defaultSort[view.kind]);
-    await loadFiles(0);
+    await loadFiles(0, view);
   };
 
   const toggleSelect = (path: string, multi = false) => {

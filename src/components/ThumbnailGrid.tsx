@@ -588,6 +588,16 @@ export function ThumbnailGrid() {
     clearThumbUrls();
   }));
 
+  // 切换视图（智能视图 / 颜色 / 文件夹 / 标签 / 回收站）时回到顶部。
+  // 不重置的话，从「所有图片」滚到一半再点「收藏」（可能只剩几张），
+  // 视口仍停在原高度 → 一片空白，看起来同样像「点了没反应」。
+  createEffect(on(files.currentView, () => {
+    if (!containerRef) return;
+    containerRef.scrollTop = 0;
+    visiblePaths.clear();
+    syncViewport();
+  }));
+
   // 列表内容变了（分页追加 / 过滤 / 搜索）就刷新「现存路径」表。
   createEffect(on(files.files, (list) => {
     livePaths.clear();
