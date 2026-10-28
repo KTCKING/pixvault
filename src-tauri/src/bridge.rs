@@ -999,7 +999,9 @@ mod tests {
     #[test]
     fn sanitize_strips_paths_and_illegal_chars() {
         assert_eq!(sanitize_file_name("../../etc/passwd", "jpg"), "passwd.jpg");
-        assert_eq!(sanitize_file_name("a:b*c?.png", "jpg"), "a_b_c_.png");
+        // `?` 是 URL 查询串的起点，先截断再清洗 —— 所以 `.png` 落在查询串里被一起丢掉，
+        // 最后回退到 mime 推出来的扩展名。
+        assert_eq!(sanitize_file_name("a:b*c?.png", "jpg"), "a_b_c.jpg");
         assert_eq!(sanitize_file_name("photo.jpg?w=800", "png"), "photo.jpg");
         assert_eq!(sanitize_file_name("trailing.  ", "png"), "trailing.png");
     }
