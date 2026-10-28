@@ -476,6 +476,9 @@
       selected = next;
       renderGrid();
     }));
+    const shot = mk("截取整页", () => void requestCapture());
+    shot.title = "把这个页面截成一张长图存进图库（快捷键 Alt+Shift+S）";
+    bar.appendChild(shot);
     const hint = el("div", "hint");
     bar.appendChild(hint);
     panelEl.appendChild(bar);
@@ -711,6 +714,125 @@
     panel.__parts.status.textContent = `0/${resp.total}`;
   }
 
+  // ───────────────────────── 整页截图 ─────────────────────────
+  //
+  // 截图这件事拆成两半：这里负责「把页面摆好」（藏掉自己的 UI、藏滚动条、
+  // 滚到指定位置），后台负责调 `captureVisibleTab` 并按屏循环、用 OffscreenCanvas
+  // 拼成一张长图。页面拿不到截屏 API；反过来，长图也不能在页面里拼 ——
+  // 站点的 CSP 常把 `data:` 图片拦掉。
+  //
+  // 三个坑：
+  //  - **fixed 导航条**：不藏掉的话每屏都会叠一条，拼出来是十层页头。第一屏留着
+  //    （那是页面正常的长相），从第二屏起藏。
+  //  - **滚动条**：会进画面，右边多一条灰带。临时 `scrollbar-width:none`，
+  //    宽度会变，所以量尺寸要放在藏完之后。
+  //  - **内部滚动容器**：SPA 常把内容放在一个 `overflow:auto` 的 div 里，滚 window
+  //    没用。这种情况直接退化成「只截可视区」，别硬拼出错位的图。
+
+  /** 截图期间被临时藏起来的 fixed / sticky 元素 */
+  let hiddenFixed = [];
+  let capScrollY = 0;
+  let capStyle = null;
+
+  const nextFrame = () =>
+    new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+  /** 能真正滚动的根元素；返回 null 说明页面用的是内部滚动容器 */
+  function scrollRoot() {
+    const de = document.scrollingElement || document.documentElement;
+    if (de && de.scrollHeight > de.clientHeight + 4) return de;
+    return null;
+  }
+
+  function measure() {
+    const root = scrollRoot() || document.scrollingElement || document.documentElement;
+    return {
+      vw: window.innerWidth,
+      vh: window.innerHeight,
+      docH: root.scrollHeight,
+      scrollY: window.scrollY || root.scrollTop || 0,
+      innerScroller: !scrollRoot(),
+    };
+  }
+
+  async function capturePrepare() {
+    capScrollY = window.scrollY || 0;
+    host.style.display = "none";
+    hoverBtn.style.display = "none";
+    capStyle = document.createElement("style");
+    capStyle.textContent =
+      // 平滑滚动必须关掉：`scroll-behavior:smooth` 的页面上 scrollTo 是渐进的，
+      // 不等它停就截，会拍到中途的模糊帧
+      "html,body{scrollbar-width:none !important;scroll-behavior:auto !important}" +
+      "html::-webkit-scrollbar,body::-webkit-scrollbar,*::-webkit-scrollbar" +
+      "{width:0 !important;height:0 !important;display:none !important}";
+    document.documentElement.appendChild(capStyle);
+    window.scrollTo({ top: 0, behavior: "instant" });
+    (document.scrollingElement || document.documentElement).scrollTop = 0;
+    await nextFrame();
+    return measure();
+  }
+
+  /**
+   * 藏掉 fixed / sticky 元素。走一遍全文档的 getComputedStyle 在超大页面上要
+   * 一两百毫秒，所以砍到 6000 个元素、并且只在这一张截图里承受这一次。
+   */
+  function hideFixed() {
+    if (hiddenFixed.length > 0) return hiddenFixed.length;
+    const all = document.querySelectorAll("body *");
+    const cap = Math.min(all.length, 6000);
+    for (let i = 0; i < cap; i++) {
+      const node = all[i];
+      const cs = getComputedStyle(node);
+      if (cs.position !== "fixed" && cs.position !== "sticky") continue;
+      if (cs.visibility === "hidden" || cs.display === "none") continue;
+      const r = node.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) continue;
+      hiddenFixed.push(node);
+      node.style.setProperty("visibility", "hidden", "important");
+    }
+    return hiddenFixed.length;
+  }
+
+  async function captureScroll(y) {
+    const root = document.scrollingElement || document.documentElement;
+    window.scrollTo({ top: y, behavior: "instant" });
+    root.scrollTop = y;
+    await nextFrame();
+    // 懒加载图片要在这 60ms 里补上，不然拼出来是灰块
+    await new Promise((r) => setTimeout(r, 60));
+    return window.scrollY || root.scrollTop || 0;
+  }
+
+  async function captureEnd() {
+    for (const node of hiddenFixed) node.style.removeProperty("visibility");
+    hiddenFixed = [];
+    if (capStyle) {
+      capStyle.remove();
+      capStyle = null;
+    }
+    host.style.display = "";
+    const root = document.scrollingElement || document.documentElement;
+    window.scrollTo({ top: capScrollY, behavior: "instant" });
+    root.scrollTop = capScrollY;
+  }
+
+  async function requestCapture() {
+    if (panel) panel.__parts.status.textContent = "截图中…";
+    try {
+      const r = await chrome.runtime.sendMessage({
+        type: "pixvault:capture-request",
+        pageUrl: location.href,
+        // 面板里刚选的存放位置一并带上：截图直接落到同一个文件夹、挂同一批标签
+        folder: pickFolder,
+        tags: currentTags(),
+      });
+      if (r && !r.started) showToast(`截图失败：${r.error || "后台没有响应"}`, 4000);
+    } catch (e) {
+      showToast(`截图失败：${String(e)}`, 4000);
+    }
+  }
+
   function onProgress(msg) {
     if (!panel || !busy) return;
     const text = `${msg.current}/${msg.total}`;
@@ -835,6 +957,13 @@
   window.addEventListener(
     "keydown",
     (e) => {
+      // Alt+Shift+S 截整页（先判，别被下面的 Alt+S 抢走）
+      if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        e.stopPropagation();
+        void requestCapture();
+        return;
+      }
       if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "s" || e.key === "S")) {
         e.preventDefault();
         e.stopPropagation();
@@ -881,6 +1010,38 @@
     if (msg.type === "pixvault:scan") {
       sendResponse({ items: collectMedia() });
       return true;
+    }
+
+    // ── 截图流程：后台一步步点名，这里照做 ──
+    if (msg.type === "pixvault:cap-prepare") {
+      capturePrepare().then(sendResponse, (e) => sendResponse({ error: String(e) }));
+      return true;
+    }
+    if (msg.type === "pixvault:cap-hide-fixed") {
+      sendResponse({ hidden: hideFixed() });
+      return true;
+    }
+    if (msg.type === "pixvault:cap-scroll") {
+      captureScroll(msg.y).then((y) => sendResponse({ y }), (e) => sendResponse({ error: String(e) }));
+      return true;
+    }
+    if (msg.type === "pixvault:cap-end") {
+      captureEnd().then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false }));
+      return true;
+    }
+    if (msg.type === "pixvault:shot-progress") {
+      if (panel) panel.__parts.status.textContent = msg.text || "";
+      return;
+    }
+    if (msg.type === "pixvault:shot-done") {
+      if (panel) panel.__parts.status.textContent = "";
+      if (msg.ok) {
+        const extra = msg.truncated ? "（页面过长，截了前 16 屏）" : "";
+        showToast(`已保存截图 ${msg.name || ""} ${extra}`, 3600);
+      } else {
+        showToast(`截图失败：${msg.error || "未知错误"}`, 5000);
+      }
+      return;
     }
 
     if (msg.type === "pixvault:toggle-panel") {

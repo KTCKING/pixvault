@@ -132,7 +132,9 @@ function base64ToBlob(base64, mime) {
  * 其余情况后台自己 fetch —— 带上站点 cookie，图床防盗链和需要登录的图都能下来。
  */
 async function fetchBlob(item) {
-  const url = item.url;
+  const url = item.url || "";
+  // 截图：字节已经在我们手里了（content 拼好的 dataURL 转的 Blob），不用再取
+  if (item.blob instanceof Blob) return { blob: item.blob, mime: item.blob.type || "image/jpeg" };
   if (url.startsWith("blob:")) {
     const opts = item.frameId === undefined ? undefined : { frameId: item.frameId };
     const resp = await chrome.tabs.sendMessage(item.tabId, { type: "pixvault:grab", url }, opts);
@@ -248,6 +250,199 @@ async function runBatch(items, pageUrl, tabId, opts = {}) {
   return { ok, fail: failed.length, errors };
 }
 
+// ───────────────────────── 整页截图 ─────────────────────────
+//
+// 纯扩展 API 实现，不申请 `debugger`（会出「正在调试此浏览器」黄条）也不申请
+// `pageCapture`：`captureVisibleTab` 是现成权限，逐屏截 + OffscreenCanvas 拼一张长图。
+//
+// 两个数字是拍出来的：
+//  - **每秒 2 次**是 Chrome 对 `captureVisibleTab` 的硬限流，所以每屏之间等 520ms；
+//  - 最多 **16 屏**（约 16000px 高），再多用户等不住、内存也吃紧，超了截前面部分
+//    并在提示里说清楚，别让人以为存了整页。
+
+const CAPTURE_MAX_FRAMES = 16;
+const CAPTURE_GAP_MS = 520;
+
+/** 上一次截屏的时间：连按两次快捷键时不能立刻再拍，会被限流打回。 */
+let lastCaptureAt = 0;
+
+async function captureOnce(windowId) {
+  const wait = CAPTURE_GAP_MS - (Date.now() - lastCaptureAt);
+  if (wait > 0) await sleep(wait);
+  lastCaptureAt = Date.now();
+  return chrome.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 92 });
+}
+
+function tabMsg(tabId, msg) {
+  return chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
+}
+
+function shotName(pageUrl) {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(
+    d.getHours(),
+  )}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  return `${siteFolder(pageUrl) || "page"}-${stamp}.jpg`;
+}
+
+/** 算要截几屏、每屏滚到哪。第一屏永远在顶部（页头要留着）。 */
+function planOffsets(meta) {
+  const vh = Math.floor(meta.vh);
+  const docH = Math.max(vh, Math.floor(meta.docH));
+  const offsets = [0];
+  let truncated = false;
+  // 内部滚动容器（SPA）：滚 window 不动，硬拼会错位，退化成只截可视区
+  if (meta.innerScroller || docH <= vh * 1.12) return { offsets, truncated };
+
+  let y = vh;
+  while (y + vh <= docH + 2) {
+    if (offsets.length >= CAPTURE_MAX_FRAMES) {
+      truncated = true;
+      break;
+    }
+    offsets.push(y);
+    y += vh;
+  }
+  const last = Math.max(0, docH - vh);
+  if (!truncated && offsets[offsets.length - 1] !== last) offsets.push(last);
+  return { offsets, truncated };
+}
+
+/**
+ * 把逐屏截图拼成一张长图。
+ *
+ * 为什么不在页面里拼：站点的 CSP 常常 `img-src` 不含 `data:`，content script
+ * 建的 `new Image()` 会被拦掉（Twitter、GitHub 这类都这样）。Service Worker 里
+ * 的 `OffscreenCanvas` + `createImageBitmap` 不受页面 CSP 约束，也不用申请任何
+ * 额外权限。
+ *
+ * 逐帧解码、画完立刻 `close()`：16 屏 × 2 倍屏的位图一起摊开要几百 MB，
+ * 一次只留一张 + 目标画布，稳得多。
+ */
+async function stitchFrames(frames, meta) {
+  if (!frames || frames.length === 0) throw new Error("没有截到画面");
+  const firstBlob = await (await fetch(frames[0])).blob();
+  if (frames.length === 1) return firstBlob;
+
+  const first = await createImageBitmap(firstBlob);
+  const scale = first.width / Math.max(1, meta.vw);
+  // 画布高度按「真正截到的范围」算：超长页只截了前 16 屏，若按整页高度算，
+  // 底下那一大段会是白的。
+  const lastOffset = meta.offsets[meta.offsets.length - 1] || 0;
+  const capturedH = Math.min(meta.docH, lastOffset + meta.vh);
+  const fullH = Math.max(1, Math.round(capturedH * scale));
+  // canvas 单边超过 16384 就画不出来，超长页整体缩一档（保持长宽比）
+  const MAX_SIDE = 16384;
+  const k = fullH > MAX_SIDE ? MAX_SIDE / fullH : 1;
+  const w = Math.max(1, Math.round(first.width * k));
+  const h = Math.max(1, Math.round(fullH * k));
+
+  let canvas;
+  try {
+    canvas = new OffscreenCanvas(w, h);
+  } catch (e) {
+    first.close();
+    throw new Error(`页面太长（${w}×${h}），浏览器开不出这么大的画布`);
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+
+  const drawAt = (bm, i) => {
+    const y = Math.round((meta.offsets[i] || 0) * scale * k);
+    ctx.drawImage(bm, 0, y, w, Math.max(1, Math.round(bm.height * k)));
+  };
+  drawAt(first, 0);
+  first.close();
+
+  for (let i = 1; i < frames.length; i++) {
+    const bm = await createImageBitmap(await (await fetch(frames[i])).blob());
+    drawAt(bm, i);
+    bm.close();
+  }
+
+  const out = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.9 });
+  if (!out || out.size < 1024) throw new Error("拼接结果异常（画布被浏览器截断）");
+  return out;
+}
+
+async function capturePage(tab, pageUrl) {
+  const meta = await tabMsg(tab.id, { type: "pixvault:cap-prepare" });
+  if (!meta || meta.error) throw new Error((meta && meta.error) || "页面没有响应");
+
+  const { offsets, truncated } = planOffsets(meta);
+  const frames = [];
+  try {
+    for (let i = 0; i < offsets.length; i++) {
+      if (i > 0) {
+        // 第二屏起藏掉 fixed 导航条，否则每屏都叠一层，拼出来十条页头
+        if (i === 1) await tabMsg(tab.id, { type: "pixvault:cap-hide-fixed" });
+        await tabMsg(tab.id, { type: "pixvault:cap-scroll", y: offsets[i] });
+        await sleep(120); // 等重绘 + 懒加载补图
+      }
+      broadcast(
+        { type: "pixvault:shot-progress", text: `截取 ${i + 1}/${offsets.length} 屏` },
+        tab.id,
+      );
+      frames.push(await captureOnce(tab.windowId));
+    }
+    const blob = await stitchFrames(frames, { ...meta, offsets });
+    return { blob, screens: offsets.length, truncated };
+  } finally {
+    // 不管是成功、失败还是用户中途切走标签页，都要把页面恢复原样
+    await tabMsg(tab.id, { type: "pixvault:cap-end" }).catch(() => {});
+  }
+}
+
+async function saveScreenshot(tab, pageUrl, opts = {}) {
+  const cfg = await getConfig();
+  const folder = resolveFolder(cfg, pageUrl, opts.folder);
+  // 面板里刚选的标签优先；右键 / 快捷键走上次记住的那套
+  const tags =
+    Array.isArray(opts.tags) && opts.tags.length > 0
+      ? opts.tags
+      : Array.isArray(cfg.pickTags)
+        ? cfg.pickTags
+        : [];
+
+  const p = await ping();
+  if (!p.ok) {
+    broadcast({ type: "pixvault:shot-done", ok: false, error: `连不上 PixVault：${p.error}` }, tab.id);
+    return { ok: 0, fail: 1 };
+  }
+
+  let shot;
+  try {
+    shot = await capturePage(tab, pageUrl);
+  } catch (e) {
+    broadcast(
+      { type: "pixvault:shot-done", ok: false, error: (e && e.message) || String(e) },
+      tab.id,
+    );
+    return { ok: 0, fail: 1 };
+  }
+
+  const name = shotName(pageUrl);
+  broadcast({ type: "pixvault:shot-progress", text: "入库中…" }, tab.id);
+  try {
+    await ingestWithRetry({ name, blob: shot.blob }, pageUrl, folder, tags);
+    badge("");
+    broadcast(
+      { type: "pixvault:shot-done", ok: true, name, screens: shot.screens, truncated: shot.truncated },
+      tab.id,
+    );
+    return { ok: 1, fail: 0 };
+  } catch (e) {
+    badge("");
+    broadcast(
+      { type: "pixvault:shot-done", ok: false, error: (e && e.message) || String(e) },
+      tab.id,
+    );
+    return { ok: 0, fail: 1 };
+  }
+}
+
 /** 标签页 → 活着的帧集合。content script 每次加载都会 hello 一次。 */
 const frames = new Map();
 
@@ -310,13 +505,31 @@ chrome.runtime.onInstalled.addListener(() => {
       title: "保存到 PixVault",
       contexts: ["image", "video"],
     });
+    chrome.contextMenus.create({
+      id: "pixvault-shot",
+      title: "截取此页到 PixVault",
+      contexts: ["page"],
+    });
+    // 图上也给一条：右键图 → 截整页，比先滚到页面空白处再右键顺手
+    chrome.contextMenus.create({
+      id: "pixvault-shot-img",
+      title: "截取整页到 PixVault",
+      contexts: ["image", "video"],
+    });
   });
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (!tab) return;
+
+  if (info.menuItemId === "pixvault-shot" || info.menuItemId === "pixvault-shot-img") {
+    void serial(() => saveScreenshot(tab, info.pageUrl || tab.url || ""));
+    return;
+  }
+
   if (info.menuItemId !== "pixvault-save") return;
   const url = info.srcUrl;
-  if (!url || !tab) return;
+  if (!url) return;
   const isVideo = Boolean(info.mediaType === "video" || VIDEO_EXT.test(url));
   void serial(async () => {
     // 右键菜单没有面板，沿用上一次在面板里选的文件夹/标签
@@ -429,8 +642,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg.type === "pixvault:retry-failed") {
-    const tabId = sender.tab?.id;
+  if (msg.type === "pixvault:capture-request") {
+    const tab = sender.tab;
+    if (!tab) {
+      sendResponse({ started: false, error: "拿不到标签页信息" });
+      return true;
+    }
+    // 截图要滚页面、要连拍十几屏，跟批量保存一样进串行队列，别两边一起抢后端
+    serial(() =>
+      saveScreenshot(tab, msg.pageUrl || tab.url || "", { folder: msg.folder, tags: msg.tags }),
+    );
+    sendResponse({ started: true });
+    return true;
+  }
+
+  if (msg.type === "pixvault:retry-failed") {    const tabId = sender.tab?.id;
     const prev = tabId === undefined ? null : lastFailed.get(tabId);
     if (!prev || prev.items.length === 0) {
       sendResponse({ started: false, error: "没有失败项" });
