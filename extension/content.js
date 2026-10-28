@@ -53,6 +53,8 @@
   let pickFolder = "@auto";
   /** 新建文件夹时用户手打的、还没进 meta 的那一条 */
   let draftFolder = "";
+  /** 本脚本所在的帧号（后台在 hello 的响应里告诉我们）。`blob:` 必须回这一帧去读。 */
+  let myFrameId = 0;
 
   // ───────────────────────── 扫描 ─────────────────────────
 
@@ -192,7 +194,7 @@
         /* 后台没响应（刚重载）就退回本帧扫描 */
       }
     }
-    return collectMedia().map((it) => ({ ...it, frameId: 0 }));
+    return collectMedia().map((it) => ({ ...it, frameId: myFrameId }));
   }
 
   // ───────────────────────── UI ─────────────────────────
@@ -816,7 +818,7 @@
     try {
       await chrome.runtime.sendMessage({
         type: "pixvault:save",
-        items: [item],
+        items: [{ ...item, frameId: myFrameId }],
         pageUrl: location.href,
         folder: pickFolder,
         tags: currentTags(),
@@ -910,9 +912,13 @@
   });
 
   // 注册到后台的「活着的帧」表里：顶层帧汇总扫描结果时按这张表逐帧问。
+  // 顺便把 frameId 记下来 —— `blob:` 只在产出它的那一帧里可读。
   try {
     chrome.runtime
       .sendMessage({ type: "pixvault:hello", pageUrl: location.href })
+      .then((r) => {
+        if (r && typeof r.frameId === "number") myFrameId = r.frameId;
+      })
       .catch(() => {});
   } catch {
     /* 老版 Chrome 的 sendMessage 不返回 Promise */
