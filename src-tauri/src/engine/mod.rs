@@ -184,7 +184,7 @@ impl Engine {
         path_str.starts_with("\\\\") || path_str.starts_with("//")
     }
 
-    fn get_data_dir() -> Option<PathBuf> {
+    pub fn get_data_dir() -> Option<PathBuf> {
         #[cfg(target_os = "windows")]
         {
             std::env::var("APPDATA")

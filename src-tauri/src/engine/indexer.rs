@@ -5,7 +5,10 @@ use walkdir::WalkDir;
 use crate::engine::db::FileEntry;
 use crate::utils::hash;
 
-/// Supported image formats for indexing
+/// Supported formats for indexing.
+///
+/// 视频也收：浏览器扩展摘下来的 mp4/webm 得能在库里看得见。它们不参与缩略图
+/// 生成（没有解码器），卡片上显示的是文件类型图标，双击用系统的播放器打开。
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "heif",
     "bmp", "tiff", "tif", "ico", "svg", "psd", "ai", "eps",
@@ -14,6 +17,7 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
     "dcs", "dcr", "drf", "k25", "kdc", "mef", "mos", "mrw", "nrw",
     "obm", "orf", "pef", "ptx", "pxn", "r3d", "raw", "rwl", "srw",
     "x3f",
+    "mp4", "m4v", "webm", "mov", "mkv", "avi", "wmv", "flv", "ogv", "mpg", "mpeg", "3gp",
 ];
 
 pub struct Indexer {

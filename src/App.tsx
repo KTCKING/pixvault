@@ -32,6 +32,7 @@ import { ContextMenu } from "@/components/ContextMenu";
 import { ToastHost } from "@/components/Toast";
 import { DialogHost } from "@/components/Dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { api } from "@/lib/tauri-api";
 import { useViewerStore } from "@/stores/viewer";
 
@@ -88,6 +89,20 @@ export default function App() {
     // 先把「打开图库时是否自动补齐缩略图」的本地偏好推给后端，再恢复图库 ——
     // 顺序反过来的话，用户明明关掉了预热，重启仍会被恢复流程先跑一整轮。
     await ui.syncPrewarmToBackend();
+
+    // 浏览器扩展存进来一个文件：刷一下列表，让用户当场看到它。子文件夹可能
+    // 是新出现的（按站点建目录），所以文件夹树也要重读。
+    const unBridge = await listen<{ filename: string; library_id: string }>(
+      "bridge-ingested",
+      (e) => {
+        if (e.payload.library_id !== activeLibraryId()) return;
+        ui.showToast(`已从网页存入 ${e.payload.filename}`, "success");
+        void files.loadFiles(0);
+        void files.loadFolderTree();
+        void files.loadViewCounts();
+      },
+    );
+    onCleanup(unBridge);
 
     // Watchdog: force-clear loading after 3s even if restore hangs
     const watchdog = setTimeout(() => {

@@ -385,6 +385,16 @@ pub fn enqueue_missing_thumbnails(
     let mut jobs: Vec<ThumbJob> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
     for (path, hash) in candidates {
+        // 视频不排缩略图任务：解码器不认 mp4，硬排只会每轮开库都白试一遍。
+        // 网格里视频卡片显示的是播放角标（见 ThumbnailCard）。
+        if crate::bridge::is_video_ext(
+            std::path::Path::new(&path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or(""),
+        ) {
+            continue;
+        }
         let hash = hash
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| crate::utils::hash::blake3_hash_bytes(path.as_bytes()));

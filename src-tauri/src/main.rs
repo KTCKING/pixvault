@@ -21,6 +21,10 @@ fn main() {
             // 后台缩略图任务需要 AppHandle 才能把进度/结果推给前端。
             app.state::<AppState>().thumbs.set_app(app.handle().clone());
 
+            // 浏览器扩展的本地服务。跟着应用一起起来，用户装了扩展就能直接摘取；
+            // 端口被占用时它自己会记下错误并在设置面板里显示，不影响主流程。
+            app.state::<AppState>().bridge.start(app.handle().clone());
+
             // ── 主窗口 ────────────────────────────────────────────────
             // 窗口刻意不写在 tauri.conf.json 里：WebView2 的启动参数只能在
             // *创建时* 传入，而是否禁用 GPU 取决于上一次运行有没有崩溃到底。
@@ -151,6 +155,12 @@ fn main() {
             commands::import::probe_eaglepack,
             commands::import::import_eaglepack,
             commands::import::cancel_eaglepack_import,
+            commands::bridge::get_bridge_status,
+            commands::bridge::set_bridge_enabled,
+            commands::bridge::set_bridge_port,
+            commands::bridge::regenerate_bridge_token,
+            commands::bridge::export_extension,
+            commands::bridge::reveal_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PixVault");

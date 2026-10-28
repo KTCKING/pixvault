@@ -18,7 +18,7 @@ import {
   IconStarFilled,
 } from "@/components/icons";
 import {
-  thumbUrl, setThumbUrl, placeholderUrl, setPlaceholderUrl, clearThumbUrls, toDisplaySrc,
+  thumbUrl, setThumbUrl, placeholderUrl, setPlaceholderUrl, clearThumbUrls, toDisplaySrc, isVideoPath,
 } from "@/lib/thumbs";
 import { activeLibraryId } from "@/stores/library";
 import { listen } from "@tauri-apps/api/event";
@@ -265,8 +265,12 @@ export function ThumbnailGrid() {
     // 顺手剔除已经不在列表里的残留（过滤 / 搜索 / 换页都会产生）。
     const win: string[] = [];
     for (const p of visiblePaths) {
-      if (livePaths.has(p)) win.push(p);
-      else visiblePaths.delete(p);
+      if (!livePaths.has(p)) {
+        visiblePaths.delete(p);
+        continue;
+      }
+      // 视频没有缩略图可等（卡片自己画播放角标），塞进请求只会白占一个名额
+      if (!isVideoPath(p)) win.push(p);
     }
     if (win.length === 0) return;
 
@@ -477,6 +481,10 @@ export function ThumbnailGrid() {
   const resyncMissing = async (missing: string[]) => {
     const libId = activeLibraryId();
     if (!libId) return;
+    // 视频永远「缺缩略图」，不过滤掉的话每轮补齐都会白问一遍，而且会一直
+    // 触发下一轮重扫。
+    missing = missing.filter((p) => !isVideoPath(p));
+    if (missing.length === 0) return;
     for (let i = 0; i < missing.length; i += RESYNC_CHUNK) {
       if (disposed) return;
       try {

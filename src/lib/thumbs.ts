@@ -91,3 +91,17 @@ export function clearThumbUrls(): void {
   phAccessors.clear();
   phSetters.clear();
 }
+
+/**
+ * 视频文件判断。
+ *
+ * 视频**不进缩略图队列**（后端没有解码器，硬排只会每轮开库都白试一遍），
+ * 所以凡事要「向缩略图队列要结果」的地方都得先把它过滤掉 —— 尤其是整库补扫，
+ * 否则视频会永远算「缺缩略图」，每次队列跑空都触发一轮无效重问。
+ */
+const VIDEO_RE = /\.(mp4|m4v|webm|mov|mkv|avi|wmv|flv|ogv|mpg|mpeg|3gp)$/i;
+
+export function isVideoPath(path: string): boolean {
+  return VIDEO_RE.test(path);
+}
+

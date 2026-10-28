@@ -33,6 +33,11 @@ cp -r "$ROOT_DIR/src-tauri/src/." "$DEST/src-tauri/src/"
 mkdir -p "$DEST/src-tauri/examples"
 cp -rf "$ROOT_DIR/src-tauri/examples/." "$DEST/src-tauri/examples/" 2>/dev/null || true
 
+# 浏览器扩展源码：`bridge.rs` 用 include_str! 把整个扩展编进二进制（「导出扩展」
+# 功能靠它），所以构建目录里必须有一份，否则 Rust 编译直接报找不到文件。
+mkdir -p "$DEST/extension"
+cp -rf "$ROOT_DIR/extension/." "$DEST/extension/"
+
 # Cargo patch（[patch.crates-io] 依赖它，漏同步 → cargo 报
 # "unable to update patches/indexmap-1.9.3 / 系统找不到指定的路径"）
 cp -rf "$ROOT_DIR/patches/." "$DEST/patches/" 2>/dev/null || true

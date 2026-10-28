@@ -496,6 +496,39 @@ export interface GpuStatus {
   crashed_last_run: boolean;
 }
 
+// ── 浏览器扩展桥接 ──────────────────────────────
+
+export interface BridgeLibraryRef {
+  id: string;
+  name: string;
+  root_path: string;
+}
+
+export interface BridgeRecentItem {
+  path: string;
+  filename: string;
+  size: number;
+  page: string;
+  at: string;
+  library_id: string;
+}
+
+export interface BridgeStatus {
+  enabled: boolean;
+  port: number;
+  /** 是否真的在监听（端口被占用 / 应用刚启动时为 false） */
+  listening: boolean;
+  bound_port: number;
+  /** 扩展里要填的访问令牌 */
+  token: string;
+  last_error: string;
+  /** 累计请求数 / 累计入库文件数 */
+  requests: number;
+  ingested: number;
+  recent: BridgeRecentItem[];
+  library: BridgeLibraryRef | null;
+}
+
 // ── API Functions ────────────────────────────────
 
 /** 交互上报的最小间隔（毫秒）。后端静默窗口约 460ms，120ms 足够把「连续滚动」
@@ -734,6 +767,24 @@ export const api = {
 
   cancelEaglepackImport: () =>
     invoke<void>("cancel_eaglepack_import"),
+
+  // 浏览器扩展桥接
+  getBridgeStatus: () => invoke<BridgeStatus>("get_bridge_status"),
+
+  setBridgeEnabled: (enabled: boolean) =>
+    invoke<BridgeStatus>("set_bridge_enabled", { enabled }),
+
+  setBridgePort: (port: number) =>
+    invoke<BridgeStatus>("set_bridge_port", { port }),
+
+  regenerateBridgeToken: () =>
+    invoke<BridgeStatus>("regenerate_bridge_token"),
+
+  /** 把内置扩展写进用户选的目录，返回文件数 */
+  exportExtension: (destDir: string) =>
+    invoke<number>("export_extension", { destDir }),
+
+  revealPath: (path: string) => invoke<void>("reveal_path", { path }),
 
   // Restore
   restoreLibraries: () =>
