@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui/tauri-v2/main/schema/tauri.conf.json",
   "productName": "PixVault",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "identifier": "com.pixvault.app",
   "build": {
     "frontendDist": "../dist",

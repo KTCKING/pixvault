@@ -1,5 +1,4 @@
 import { createSignal, createEffect, untrack, For, onMount, onCleanup, Show } from "solid-js";
-import { Portal } from "solid-js/web";
 import { useLibraryStore, activeLibraryId } from "@/stores/library";
 import { useFilesStore } from "@/stores/files";
 import { useTagsStore } from "@/stores/tags";
@@ -12,7 +11,6 @@ import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { InfoPanel } from "@/components/InfoPanel";
 import { SearchBar } from "@/components/SearchBar";
 import {
-  IconChevronDown,
   IconChevronLeft,
   IconChevronRight,
   IconFolder,
@@ -47,45 +45,6 @@ export default function App() {
   const viewer = useViewerStore();
 
   const [dragOver, setDragOver] = createSignal(false);
-  /** 顶部「当前库」切换下拉是否展开。 */
-  const [libMenuOpen, setLibMenuOpen] = createSignal(false);
-  /** 下拉的固定坐标：用按钮的视口矩形算，避免菜单被顶栏裁掉。 */
-  const [libMenuPos, setLibMenuPos] = createSignal({ left: 0, top: 0 });
-  let libBtnRef: HTMLButtonElement | undefined;
-
-  /**
-   * 打开 / 关闭「当前库」下拉。
-   *
-   * 菜单用 Portal 挂到 body、fixed 定位，不能留在 header 里：
-   * `.app-header` 带 backdrop-filter，会同时创建 stacking context 与
-   * containing block。留在里面会有两个后果：
-   *   ① 菜单的 z-50 只在 header 内部有效，header 整体是 static（z-index auto），
-   *      绘制顺序早于后面 position:relative 的主内容，伸出去的部分被网格盖住；
-   *   ② 遮罩的 `fixed inset-0` 变成相对 header 定位，只剩顶栏那一条，
-   *      点击主内容关不掉菜单。
-   */
-  const toggleLibMenu = () => {
-    if (libMenuOpen()) {
-      setLibMenuOpen(false);
-      return;
-    }
-    const r = libBtnRef?.getBoundingClientRect();
-    if (r) {
-      const MENU_W = 256; // w-64
-      setLibMenuPos({
-        left: Math.max(8, Math.min(r.left, window.innerWidth - MENU_W - 8)),
-        top: r.bottom + 4,
-      });
-    }
-    setLibMenuOpen(true);
-  };
-
-  // 窗口尺寸一变，固定坐标就失准了，直接关掉下拉。
-  onMount(() => {
-    const closeOnResize = () => setLibMenuOpen(false);
-    window.addEventListener("resize", closeOnResize);
-    onCleanup(() => window.removeEventListener("resize", closeOnResize));
-  });
 
   /**
    * 切换 / 打开库后重置视图并重载全部库相关数据（侧边栏计数、文件夹树、标签、网格）。
@@ -206,11 +165,6 @@ export default function App() {
         ui.setShowSearch(true);
       }
       if (e.key === "Escape") {
-        // 「当前库」下拉也是一层浮层：Esc 只关它，不动选区与右栏。
-        if (libMenuOpen()) {
-          setLibMenuOpen(false);
-          return;
-        }
         files.clearSelection();
         ui.setShowSearch(false);
         ui.setInfoPanelOpen(false);
@@ -264,58 +218,22 @@ export default function App() {
           <span class="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>PixVault</span>
         </div>
 
-        {/* 当前库切换（Pixcall 顶部的库切换器） */}
+        {/* 当前库：纯状态显示。切换 / 新建 / 删除都在侧栏「资源库」区，
+            这里再放一个下拉就是同一个功能两个入口。侧栏收起时点它可展开侧栏。 */}
         <Show when={library.activeLibrary()}>
-          <div class="relative">
-            <button
-              ref={libBtnRef}
-              class="flex items-center gap-1.5 px-2 py-1 rounded text-xs btn-ghost"
-              onClick={toggleLibMenu}
-              title="切换资源库"
-            >
-              <span style={{ color: "var(--text-muted)" }}>当前库</span>
-              <span class="font-medium max-w-[10rem] truncate" style={{ color: "var(--text-primary)" }}>
-                {library.activeLibrary()?.name}
-              </span>
-              <span style={{ color: "var(--text-muted)" }}>
-                <IconChevronDown size={12} />
-              </span>
-            </button>
-            <Portal>
-              <Show when={libMenuOpen()}>
-                {/* 透明遮罩：点空白处关闭下拉 */}
-                <div class="fixed inset-0 z-40" onClick={() => setLibMenuOpen(false)} />
-                <div
-                  class="glass-modal fixed z-50 w-64 rounded-lg py-1 animate-scale-in"
-                  style={{
-                    left: `${libMenuPos().left}px`,
-                    top: `${libMenuPos().top}px`,
-                  }}
-                >
-                  <For each={library.libraries()}>
-                    {(lib) => (
-                      <button
-                        class="w-full text-left px-3 py-2 text-xs transition-colors flex items-center gap-2 hover:bg-[var(--bg-hover)]"
-                        style={{ color: lib.id === library.activeLibraryId() ? "var(--accent)" : "var(--text-primary)" }}
-                        onClick={() => {
-                          library.setActiveLibraryId(lib.id);
-                          setLibMenuOpen(false);
-                        }}
-                      >
-                        <span class="flex-shrink-0" style={{ color: "var(--text-muted)" }}>
-                          {lib.is_network ? <IconGlobe size={14} /> : <IconLibrary size={14} />}
-                        </span>
-                        <span class="truncate flex-1">{lib.name}</span>
-                        <span class="text-2xs tabular-nums flex-shrink-0" style={{ color: "var(--text-muted)" }}>
-                          {lib.file_count > 0 ? lib.file_count.toLocaleString() : ""}
-                        </span>
-                      </button>
-                    )}
-                  </For>
-                </div>
-              </Show>
-            </Portal>
-          </div>
+          <button
+            class="flex items-center gap-1.5 px-2 py-1 rounded text-xs"
+            classList={{ "btn-ghost": !ui.sidebarOpen() }}
+            onClick={() => {
+              if (!ui.sidebarOpen()) ui.setSidebarOpen(true);
+            }}
+            title={ui.sidebarOpen() ? "当前资源库" : "展开侧栏以切换资源库"}
+          >
+            <span style={{ color: "var(--text-muted)" }}>当前库</span>
+            <span class="font-medium max-w-[10rem] truncate" style={{ color: "var(--text-primary)" }}>
+              {library.activeLibrary()?.name}
+            </span>
+          </button>
           <Show when={library.nasStatus()}>
             <span class="text-xs ml-1 flex items-center">
               <StatusDot tone={library.nasStatus()!.status} />
