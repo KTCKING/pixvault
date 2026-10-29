@@ -2,7 +2,8 @@ import { createSignal, onMount, onCleanup, Show } from "solid-js";
 import type { JSX } from "solid-js";
 import { api, type GpuMode, type GpuStatus, type ImportSummary, type PackProbe, type PackProgress } from "@/lib/tauri-api";
 import { useLibraryStore, warmForLibrary } from "@/stores/library";
-import { useUIStore } from "@/stores/ui";
+import { useFilesStore } from "@/stores/files";
+import { useUIStore, type RecentWindow } from "@/stores/ui";
 import { CircleProgress } from "./CircleProgress";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
@@ -32,6 +33,7 @@ export function SettingsModal(props: Props) {
   const theme = useTheme();
   const library = useLibraryStore();
   const ui = useUIStore();
+  const files = useFilesStore();
   const [busy, setBusy] = createSignal(false);
   const [result, setResult] = createSignal<ImportSummary | null>(null);
   const [error, setError] = createSignal("");
@@ -75,6 +77,17 @@ export function SettingsModal(props: Props) {
     { value: "hardware", label: "硬件加速" },
     { value: "software", label: "软件渲染" },
   ];
+
+  const RECENT_LABELS: { value: RecentWindow; label: string }[] = [
+    { value: "week", label: "最近一周" },
+    { value: "month", label: "最近一个月" },
+  ];
+
+  /** 改「最近新增」的时间窗口；正停在该视图时立刻按新窗口重查一次。 */
+  const pickRecentWindow = (w: RecentWindow) => {
+    ui.setRecentWindow(w);
+    if (files.currentView().kind === "recent") void files.setView({ kind: "recent" });
+  };
 
   /** 当前活动图库的预热进度（可能没有 —— 表示已经补完或还没开始）。 */
   const activeWarm = () => {
@@ -317,6 +330,29 @@ export function SettingsModal(props: Props) {
           </Show>
 
           <div class="mt-2 text-xs" style={{ color: s.muted }}>改动需要重启应用才生效。</div>
+        </div>
+
+        {/* ── 最近新增 ───────────────────────────────────────── */}
+        <div class="text-sm mb-3" style={{ color: s.secondary }}>最近新增</div>
+
+        <div class="px-4 py-3 rounded-lg mb-5" style={{ background: s.tertiary, border: `1px solid ${s.border}` }}>
+          <div class="text-sm" style={{ color: s.primary }}>「最近新增」统计多久以内导入的图片</div>
+          <div class="text-xs mt-0.5 leading-relaxed" style={{ color: s.muted }}>
+            按导入时间算（不是文件的修改时间）。整批导入的库选「最近一周」才看得出它和
+            「所有图片」的区别。
+          </div>
+          <div class="mt-3 flex items-center gap-2">
+            {RECENT_LABELS.map((m) => (
+              <button
+                class="btn-secondary text-xs px-2.5 py-1"
+                style={{
+                  background: ui.recentWindow() === m.value ? s.accent : undefined,
+                  color: ui.recentWindow() === m.value ? "var(--accent-contrast)" : undefined,
+                }}
+                onClick={() => pickRecentWindow(m.value)}
+              >{m.label}</button>
+            ))}
+          </div>
         </div>
 
         <div class="text-sm mb-3" style={{ color: s.secondary }}>浏览器扩展</div>

@@ -948,7 +948,16 @@ export function ThumbnailGrid() {
               <div class="mb-3 flex justify-center opacity-50">
                 <IconImage size={40} />
               </div>
-              <p class="text-sm">暂无图片</p>
+              <p class="text-sm">
+                {files.currentView().kind === "recent"
+                  ? `最近${ui.recentWindow() === "month" ? "一个月" : "一周"}没有新导入的图片`
+                  : "暂无图片"}
+              </p>
+              <Show when={files.currentView().kind === "recent"}>
+                <p class="text-xs mt-1.5" style={{ color: s.muted }}>
+                  可以在设置里把「最近新增」的时间窗口改成最近一个月
+                </p>
+              </Show>
             </div>
           </div>
         }>

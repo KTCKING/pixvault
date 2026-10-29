@@ -54,6 +54,8 @@ pub async fn get_files(
     filter_favorite: Option<bool>,
     filter_color: Option<String>,
     filter_min_rating: Option<i32>,
+    // 「最近新增」的时间窗口（天数）：只看最近 N 天内导入的文件。
+    filter_recent_days: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<PaginatedFiles, String> {
     let engine = state.engine.lock().unwrap();
@@ -67,6 +69,7 @@ pub async fn get_files(
         favorite: filter_favorite,
         color: filter_color,
         min_rating: filter_min_rating,
+        recent_days: filter_recent_days,
         include_deleted: false,
     };
 

@@ -1,6 +1,7 @@
 import { createSignal, createEffect } from "solid-js";
 import { api, type FileInfo, type PaginatedFiles, type ViewState, type FolderNode, type ViewCounts } from "@/lib/tauri-api";
 import { activeLibraryId, libraries, setLibraries } from "./library";
+import { recentWindowDays } from "./ui";
 
 const [files, setFiles] = createSignal<FileInfo[]>([]);
 const [totalFiles, setTotalFiles] = createSignal(0);
@@ -23,19 +24,20 @@ export function useFilesStore() {
   const queryForView = (view: ViewState, sort: { by: string; order: string }) => {
     switch (view.kind) {
       case "recent":
-        return { sortBy: "created_at", sortOrder: "DESC", filterFolder: undefined, filterFavorite: undefined, filterColor: undefined, filterMinRating: undefined, filterTag: undefined };
+        // 「最近新增」= 最近 N 天导入的（N 在设置里选 7 / 30），按导入时间倒序。
+        return { sortBy: "created_at", sortOrder: "DESC", filterFolder: undefined, filterFavorite: undefined, filterColor: undefined, filterMinRating: undefined, filterTag: undefined, filterRecentDays: recentWindowDays() };
       case "favorite":
-        return { sortBy: "created_at", sortOrder: "DESC", filterFolder: undefined, filterFavorite: true, filterColor: undefined, filterMinRating: undefined, filterTag: undefined };
+        return { sortBy: "created_at", sortOrder: "DESC", filterFolder: undefined, filterFavorite: true, filterColor: undefined, filterMinRating: undefined, filterTag: undefined, filterRecentDays: undefined };
       case "rated":
-        return { sortBy: "rating", sortOrder: "DESC", filterFolder: undefined, filterFavorite: undefined, filterColor: undefined, filterMinRating: 1, filterTag: undefined };
+        return { sortBy: "rating", sortOrder: "DESC", filterFolder: undefined, filterFavorite: undefined, filterColor: undefined, filterMinRating: 1, filterTag: undefined, filterRecentDays: undefined };
       case "color":
-        return { sortBy: "mtime", sortOrder: "DESC", filterFolder: undefined, filterFavorite: undefined, filterColor: view.color, filterMinRating: undefined, filterTag: undefined };
+        return { sortBy: "mtime", sortOrder: "DESC", filterFolder: undefined, filterFavorite: undefined, filterColor: view.color, filterMinRating: undefined, filterTag: undefined, filterRecentDays: undefined };
       case "folder":
-        return { sortBy: "mtime", sortOrder: "DESC", filterFolder: view.folder, filterFavorite: undefined, filterColor: undefined, filterMinRating: undefined, filterTag: undefined };
+        return { sortBy: "mtime", sortOrder: "DESC", filterFolder: view.folder, filterFavorite: undefined, filterColor: undefined, filterMinRating: undefined, filterTag: undefined, filterRecentDays: undefined };
       case "tag":
-        return { sortBy: "mtime", sortOrder: "DESC", filterFolder: undefined, filterFavorite: undefined, filterColor: undefined, filterMinRating: undefined, filterTag: view.tagId };
+        return { sortBy: "mtime", sortOrder: "DESC", filterFolder: undefined, filterFavorite: undefined, filterColor: undefined, filterMinRating: undefined, filterTag: view.tagId, filterRecentDays: undefined };
       default:
-        return { sortBy: sort.by, sortOrder: sort.order, filterFolder: undefined, filterFavorite: undefined, filterColor: undefined, filterMinRating: undefined, filterTag: undefined };
+        return { sortBy: sort.by, sortOrder: sort.order, filterFolder: undefined, filterFavorite: undefined, filterColor: undefined, filterMinRating: undefined, filterTag: undefined, filterRecentDays: undefined };
     }
   };
 
@@ -74,7 +76,8 @@ export function useFilesStore() {
         q.filterFolder,
         q.filterFavorite,
         q.filterColor,
-        q.filterMinRating
+        q.filterMinRating,
+        q.filterRecentDays
       );
       if (offset === 0) {
         setFiles(result.files);

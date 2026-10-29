@@ -86,6 +86,9 @@ pub struct FileFilter {
     pub color: Option<String>,
     /// 评分下限（含），1 表示「已评分」。
     pub min_rating: Option<i32>,
+    /// 只看最近 N 天内**导入**的文件（按 `created_at`，不是文件系统时间）。
+    /// 「最近新增」视图用它做时间窗口，N 由前端设置决定（7 / 30）。
+    pub recent_days: Option<i64>,
     /// 是否只包含回收站里的文件（默认 false）。
     pub include_deleted: bool,
 }
@@ -386,6 +389,13 @@ impl Database {
         if let Some(min) = filter.min_rating {
             sql.push_str(" AND COALESCE(f.rating, 0) >= ?");
             params.push(Box::new(min));
+        }
+
+        if let Some(days) = filter.recent_days {
+            // created_at 是 `datetime('now')` 写进去的 UTC 文本，直接让 SQLite
+            // 用同一套时钟做减法，避免前端算时间戳时踩时区 / 格式不一致。
+            sql.push_str(" AND f.created_at >= datetime('now', ?)");
+            params.push(Box::new(format!("-{} days", days)));
         }
 
         (sql, params)

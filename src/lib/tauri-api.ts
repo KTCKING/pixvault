@@ -580,7 +580,8 @@ export const api = {
     filterFolder?: string,
     filterFavorite?: boolean,
     filterColor?: string,
-    filterMinRating?: number
+    filterMinRating?: number,
+    filterRecentDays?: number
   ) =>
     invoke<PaginatedFiles>("get_files", {
       libraryId,
@@ -594,6 +595,7 @@ export const api = {
       filterFavorite,
       filterColor,
       filterMinRating,
+      filterRecentDays,
     }),
 
   getFileInfo: (libraryId: string, filePath: string) =>

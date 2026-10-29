@@ -41,8 +41,39 @@ async function syncPrewarmToBackend() {
   }
 }
 
-const [viewMode, setViewMode] = createSignal<ViewMode>("grid");
-const [thumbnailSize, setThumbnailSize] = createSignal(220);
+// ── 「最近新增」的时间窗口（设置里可选） ─────────────
+//
+// 这个视图原本只是「按导入时间排序的全部图片」，整批导入的库和「所有图片」
+// 几乎看不出区别。加时间窗口后它才有独立语义。
+export type RecentWindow = "week" | "month";
+const RECENT_WINDOW_KEY = "pixvault.recent-window";
+
+function readRecentWindow(): RecentWindow {
+  try {
+    return localStorage.getItem(RECENT_WINDOW_KEY) === "month" ? "month" : "week";
+  } catch {
+    return "week";
+  }
+}
+
+const [recentWindow, setRecentWindowSignal] = createSignal<RecentWindow>(readRecentWindow());
+
+/** 改为周 / 月窗口。持久化到本地，下次启动沿用。 */
+function setRecentWindow(w: RecentWindow) {
+  setRecentWindowSignal(w);
+  try {
+    localStorage.setItem(RECENT_WINDOW_KEY, w);
+  } catch {
+    /* 忽略：无痕模式等场景下写不进去也不影响本次会话 */
+  }
+}
+
+/** 把窗口翻译成后端要的天数。 */
+function recentWindowDays(): number {
+  return recentWindow() === "month" ? 30 : 7;
+}
+
+const [viewMode, setViewMode] = createSignal<ViewMode>("grid");const [thumbnailSize, setThumbnailSize] = createSignal(220);
 const [sidebarOpen, setSidebarOpen] = createSignal(true);
 const [sidebarTab, setSidebarTab] = createSignal<SidebarTab>("folders");
 const [searchQuery, setSearchQuery] = createSignal("");
@@ -170,6 +201,8 @@ export function useUIStore() {
     toasts,
     dialog,
     prewarmEnabled,
+    recentWindow,
+    recentWindowDays,
     showToast,
     dismissToast,
     openDialog,
@@ -191,7 +224,8 @@ export function useUIStore() {
     setContextMenu,
     setPrewarmEnabled,
     syncPrewarmToBackend,
+    setRecentWindow,
   };
 }
 
-export { prewarmEnabled, setPrewarmEnabled, syncPrewarmToBackend };
+export { prewarmEnabled, setPrewarmEnabled, syncPrewarmToBackend, recentWindow, recentWindowDays, setRecentWindow };
