@@ -73,7 +73,34 @@ function recentWindowDays(): number {
   return recentWindow() === "month" ? 30 : 7;
 }
 
-const [viewMode, setViewMode] = createSignal<ViewMode>("grid");const [thumbnailSize, setThumbnailSize] = createSignal(220);
+// ── 彻底删除时是否连磁盘文件一起删（默认关） ─────────
+//
+// 默认关是安全取向：不做任何事时，回收站只动索引，原图始终留在磁盘上，
+// 误点「彻底删除」不会真的丢文件。只有用户主动开启，后端才会 remove_file，
+// 并且仍然会校验路径在库根内。
+const PURGE_DISK_KEY = "pixvault.purge-deletes-disk";
+
+function readPurgeDisk(): boolean {
+  try {
+    return localStorage.getItem(PURGE_DISK_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+const [purgeDeletesDisk, setPurgeDeletesDiskSignal] = createSignal<boolean>(readPurgeDisk());
+
+function setPurgeDeletesDisk(on: boolean) {
+  setPurgeDeletesDiskSignal(on);
+  try {
+    localStorage.setItem(PURGE_DISK_KEY, on ? "1" : "0");
+  } catch {
+    /* 忽略：无痕模式等场景下写不进去也不影响本次会话 */
+  }
+}
+
+const [viewMode, setViewMode] = createSignal<ViewMode>("grid");
+const [thumbnailSize, setThumbnailSize] = createSignal(220);
 const [sidebarOpen, setSidebarOpen] = createSignal(true);
 const [sidebarTab, setSidebarTab] = createSignal<SidebarTab>("folders");
 const [searchQuery, setSearchQuery] = createSignal("");
@@ -225,7 +252,9 @@ export function useUIStore() {
     setPrewarmEnabled,
     syncPrewarmToBackend,
     setRecentWindow,
+    purgeDeletesDisk,
+    setPurgeDeletesDisk,
   };
 }
 
-export { prewarmEnabled, setPrewarmEnabled, syncPrewarmToBackend, recentWindow, recentWindowDays, setRecentWindow };
+export { prewarmEnabled, setPrewarmEnabled, syncPrewarmToBackend, recentWindow, recentWindowDays, setRecentWindow, purgeDeletesDisk, setPurgeDeletesDisk };

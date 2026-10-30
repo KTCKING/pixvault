@@ -83,6 +83,11 @@ export function SettingsModal(props: Props) {
     { value: "month", label: "最近一个月" },
   ];
 
+  const PURGE_DISK_LABELS: { value: boolean; label: string }[] = [
+    { value: false, label: "关闭（只移除记录）" },
+    { value: true, label: "开启（连原文件一起删）" },
+  ];
+
   /** 改「最近新增」的时间窗口；正停在该视图时立刻按新窗口重查一次。 */
   const pickRecentWindow = (w: RecentWindow) => {
     ui.setRecentWindow(w);
@@ -350,6 +355,42 @@ export function SettingsModal(props: Props) {
                   color: ui.recentWindow() === m.value ? "var(--accent-contrast)" : undefined,
                 }}
                 onClick={() => pickRecentWindow(m.value)}
+              >{m.label}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* ── 回收站 ─────────────────────────────────────────── */}
+        <div class="text-sm mb-3" style={{ color: s.secondary }}>回收站</div>
+
+        <div class="px-4 py-3 rounded-lg mb-5" style={{ background: s.tertiary, border: `1px solid ${s.border}` }}>
+          <div class="text-sm" style={{ color: s.primary }}>彻底删除时一并删除磁盘文件</div>
+          <div class="text-xs mt-0.5 leading-relaxed" style={{ color: s.muted }}>
+            回收站是所有库共用的，默认只改动库里的记录，原图始终留在磁盘上 ——
+            误点「彻底删除」也不会真的丢文件。打开后，彻底删除与清空回收站会把原文件一起删掉，不可恢复。
+          </div>
+          <div class="mt-3 flex items-center gap-2">
+            {PURGE_DISK_LABELS.map((m) => (
+              <button
+                class="btn-secondary text-xs px-2.5 py-1"
+                style={{
+                  background: ui.purgeDeletesDisk() === m.value ? s.accent : undefined,
+                  color: ui.purgeDeletesDisk() === m.value ? "var(--accent-contrast)" : undefined,
+                }}
+                onClick={() => {
+                  if (!m.value) {
+                    ui.setPurgeDeletesDisk(false);
+                    return;
+                  }
+                  ui.requestConfirm({
+                    title: "开启后会真的删除原文件",
+                    message:
+                      "开启后，「彻底删除」与「清空回收站」会把磁盘上的原文件一并删除，无法恢复。确定开启吗？",
+                    confirmText: "开启",
+                    danger: true,
+                    onConfirm: () => ui.setPurgeDeletesDisk(true),
+                  });
+                }}
               >{m.label}</button>
             ))}
           </div>

@@ -264,6 +264,12 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
     case "get_deleted_files":
       return [] as unknown as T;
 
+    case "get_trash":
+      return { entries: [], sources: [], unavailable: [] } as unknown as T;
+
+    case "get_trash_count":
+      return 0 as unknown as T;
+
     case "trash_files":
       return 0 as unknown as T;
 
@@ -272,7 +278,8 @@ async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promi
       return null as unknown as T;
 
     case "empty_trash":
-      return 0 as unknown as T;
+    case "empty_trash_all":
+      return { removed: 0, failed: [] } as unknown as T;
 
     default:
       console.warn(`Mock: unknown command "${cmd}"`);
@@ -351,6 +358,37 @@ export interface ViewCounts {
   rated: number;
   trash: number;
   colors: Record<string, number>;
+}
+
+/**
+ * 回收站条目：文件信息 + 来源库。
+ *
+ * 回收站是**逻辑库**，不搬文件、没有自己的目录。条目带着来源库，
+ * 恢复 / 彻底删除时按 `library_id` 回原库执行，不存在跨库写入。
+ */
+export interface TrashEntry extends FileInfo {
+  library_id: string;
+  library_name: string;
+}
+
+/** 回收站里某个来源库的汇总，用于顶部的来源筛选条。 */
+export interface TrashSource {
+  library_id: string;
+  library_name: string;
+  count: number;
+}
+
+export interface TrashPayload {
+  entries: TrashEntry[];
+  sources: TrashSource[];
+  /** 读不出来的库名（NAS 离线、盘不在）。UI 必须标注，不能假装它没有回收站。 */
+  unavailable: string[];
+}
+
+/** 清空回收站的结果：删不掉的条目会把记录留下，方便重试。 */
+export interface EmptyTrashResult {
+  removed: number;
+  failed: string[];
 }
 
 /** 当前浏览的「视图」——侧边栏点谁就是谁，网格按它加载。 */
@@ -624,14 +662,25 @@ export const api = {
   getDeletedFiles: (libraryId: string) =>
     invoke<FileInfo[]>("get_deleted_files", { libraryId }),
 
+  /** 跨库聚合回收站：回收站是「逻辑库」，一次拿全部来源库的条目。 */
+  getTrash: () => invoke<TrashPayload>("get_trash"),
+
+  /** 跨库回收站总条目数（侧栏徽标用，只 COUNT 不取行）。 */
+  getTrashCount: () => invoke<number>("get_trash_count"),
+
   restoreFile: (libraryId: string, filePath: string) =>
     invoke<void>("restore_file", { libraryId, filePath }),
 
-  purgeFile: (libraryId: string, filePath: string) =>
-    invoke<void>("purge_file", { libraryId, filePath }),
+  /** `alsoDeleteDisk` 为真时连磁盘文件一起删（后端会校验路径在库根内）。 */
+  purgeFile: (libraryId: string, filePath: string, alsoDeleteDisk = false) =>
+    invoke<void>("purge_file", { libraryId, filePath, alsoDeleteDisk }),
 
-  emptyTrash: (libraryId: string) =>
-    invoke<number>("empty_trash", { libraryId }),
+  emptyTrash: (libraryId: string, alsoDeleteDisk = false) =>
+    invoke<EmptyTrashResult>("empty_trash", { libraryId, alsoDeleteDisk }),
+
+  /** 清空所有库的回收站。 */
+  emptyTrashAll: (alsoDeleteDisk = false) =>
+    invoke<EmptyTrashResult>("empty_trash_all", { alsoDeleteDisk }),
 
   getThumbnailPath: (libraryId: string, filePath: string) =>
     invoke<ThumbnailResult>("get_thumbnail_path", { libraryId, filePath }),

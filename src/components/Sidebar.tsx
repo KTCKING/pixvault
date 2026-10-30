@@ -328,19 +328,7 @@ export function Sidebar() {
             active={isView("favorite")} onClick={() => files.setView({ kind: "favorite" })} />
           <NavItem icon={<IconStarFilled size={14} />} label="已评分" count={files.viewCounts()?.rated}
             active={isView("rated")} onClick={() => files.setView({ kind: "rated" })} />
-          <NavItem icon={<IconTrash size={14} />} label="回收站" count={files.viewCounts()?.trash}
-            active={isView("trash")} dropTarget={trashActive()}
-            title={trashActive() ? "松开以移入回收站" : "回收站：把图片拖到此处删除"}
-            onClick={() => files.setView({ kind: "trash" })}
-            onContextMenu={() => {
-              ui.requestConfirm({
-                title: "清空回收站",
-                message: `确定要彻底删除回收站中的 ${files.viewCounts()?.trash ?? 0} 个文件吗？此操作不可恢复。`,
-                confirmText: "彻底删除",
-                danger: true,
-                onConfirm: async () => { await files.emptyTrash(); },
-              });
-            }} />
+          {/* 回收站不在这里 —— 它是跨库的「逻辑库」，入口在下面「资源库」区置底。 */}
         </div>
 
         {/* ── 颜色标记 ─────────────────────────────── */}
@@ -423,6 +411,46 @@ export function Sidebar() {
               </Show>
             )}
           </For>
+          {/*
+            回收站是「逻辑库」：置底常驻、跨所有库聚合、没有自己的目录。
+            它固定排在所有真实库之后，不参与拖拽排序（handleMouseDown 只挂在库行上）。
+            拖图片到它上面 = 软删除到该图片所在的库。
+          */}
+          <NavItem
+            icon={<IconTrash size={14} />}
+            label="回收站"
+            count={files.trashTotal()}
+            active={isView("trash")}
+            dropTarget={trashActive()}
+            title={trashActive()
+              ? "松开以移入回收站"
+              : "回收站：所有库共享，拖图片到此处删除"}
+            onClick={() => files.setView({ kind: "trash" })}
+            onContextMenu={() => {
+              const n = files.trashTotal();
+              if (n === 0) {
+                ui.showToast("回收站已经是空的", "info");
+                return;
+              }
+              const alsoDisk = ui.purgeDeletesDisk();
+              ui.requestConfirm({
+                title: "清空回收站",
+                message: alsoDisk
+                  ? `将删除所有库回收站里的 ${n} 个文件，并连同磁盘上的原文件一起删除。此操作不可恢复。`
+                  : `将把 ${n} 个文件从库中移除，磁盘上的原文件会保留。若希望连原文件一起删，可在设置里打开「彻底删除时一并删除磁盘文件」。`,
+                confirmText: alsoDisk ? "删除并清理磁盘" : "从库中移除",
+                danger: true,
+                onConfirm: async () => {
+                  const r = await files.emptyTrash();
+                  if (r.failed.length > 0) {
+                    ui.showToast(`已清空 ${r.removed} 个，${r.failed.length} 个未能删除`, "error");
+                  } else {
+                    ui.showToast(`已清空 ${r.removed} 个`);
+                  }
+                },
+              });
+            }}
+          />
           <Show when={library.libraries().length === 0}>
             <p class="px-2.5 py-1 text-2xs" style={{ color: "var(--text-muted)" }}>还没有打开任何库</p>
           </Show>

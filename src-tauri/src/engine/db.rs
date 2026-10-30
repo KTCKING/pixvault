@@ -549,6 +549,27 @@ impl Database {
         Ok(())
     }
 
+    /// 回收站里的条目数（只 COUNT，不取行 —— 侧栏徽标频繁调用）。
+    pub fn count_deleted(&self) -> SqlResult<usize> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM files WHERE is_deleted = 1", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
+    /// 按路径批量移除记录。
+    ///
+    /// 「彻底删除时一并删磁盘文件」这条路径用它：只把**真正删成功的文件**
+    /// 从库里摘掉，删失败的那些记录留着，用户还能再试一次。
+    pub fn purge_paths(&self, paths: &[String]) -> SqlResult<usize> {
+        let mut n = 0;
+        for p in paths {
+            self.purge_file(p)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     /// Permanently remove every soft-deleted file (empty the trash).
     pub fn purge_all_deleted(&self) -> SqlResult<usize> {
         self.conn.execute(

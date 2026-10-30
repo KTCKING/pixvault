@@ -1,7 +1,7 @@
 import { createSignal, createEffect } from "solid-js";
-import { api, type FileInfo, type PaginatedFiles, type ViewState, type FolderNode, type ViewCounts } from "@/lib/tauri-api";
+import { api, type FileInfo, type PaginatedFiles, type ViewState, type FolderNode, type ViewCounts, type TrashEntry, type TrashSource } from "@/lib/tauri-api";
 import { activeLibraryId, libraries, setLibraries } from "./library";
-import { recentWindowDays } from "./ui";
+import { recentWindowDays, purgeDeletesDisk } from "./ui";
 
 const [files, setFiles] = createSignal<FileInfo[]>([]);
 const [totalFiles, setTotalFiles] = createSignal(0);
@@ -11,7 +11,16 @@ const [filterExt, setFilterExt] = createSignal<string | undefined>();
 /** 当前浏览的视图（侧边栏点谁就是谁）。默认「所有图片」。 */
 const [currentView, setCurrentView] = createSignal<ViewState>({ kind: "all" });
 const [isLoading, setIsLoading] = createSignal(false);
-const [deletedFiles, setDeletedFiles] = createSignal<FileInfo[]>([]);
+/** 回收站里的条目（自带来源库）。 */
+const [deletedFiles, setDeletedFiles] = createSignal<TrashEntry[]>([]);
+/** 回收站按来源库的汇总，用于顶部筛选条。 */
+const [trashSources, setTrashSources] = createSignal<TrashSource[]>([]);
+/** 读不出来的库名（NAS 离线等）。 */
+const [trashUnavailable, setTrashUnavailable] = createSignal<string[]>([]);
+/** 跨库回收站总条目数（侧栏徽标）。 */
+const [trashTotal, setTrashTotal] = createSignal(0);
+/** 回收站里按来源库筛选（null = 全部）。 */
+const [trashFilter, setTrashFilterSignal] = createSignal<string | null>(null);
 /** 侧边栏「文件夹」树。 */
 const [folderTree, setFolderTree] = createSignal<FolderNode | null>(null);
 /** 侧边栏智能视图 / 颜色标记的计数徽标。 */
@@ -49,14 +58,14 @@ export function useFilesStore() {
    * 意外订阅「当前视图」，进而在切换视图时自我重置。
    */
   const loadFiles = async (offset = 0, view: ViewState = currentView()) => {
-    const libId = activeLibraryId();
-    if (!libId) return;
-
-    // 回收站是独立的数据通道。
+    // 回收站是逻辑库，跨所有库聚合，不依赖当前活动库。
     if (view.kind === "trash") {
       await loadDeletedFiles();
       return;
     }
+
+    const libId = activeLibraryId();
+    if (!libId) return;
 
     if (offset === 0) {
       setFiles([]);
@@ -215,57 +224,117 @@ export function useFilesStore() {
     void loadViewCounts();
   };
 
-  /** Load the trash contents of the active library. */
-  const loadDeletedFiles = async () => {
-    const libId = activeLibraryId();
-    if (!libId) return;
-    const result = await api.getDeletedFiles(libId);
-    setDeletedFiles(result);
-    setFiles(result);
-    setTotalFiles(result.length);
+  /**
+   * 加载回收站 —— 跨所有库聚合。
+   *
+   * 回收站是逻辑库，不属于当前活动库。后端遍历 Engine 里已打开的库
+   * （启动时已全部打开、连接常驻），每库一句走索引的查询。
+   */
+  /** 按来源库筛选后重新铺到网格上（回收站视图专用）。 */
+  const applyTrashFilter = () => {
+    const id = trashFilter();
+    const shown = id ? deletedFiles().filter((f) => f.library_id === id) : deletedFiles();
+    setFiles(shown);
+    setTotalFiles(shown.length);
   };
 
-  /** Restore a file from trash back into the library. */
-  const restoreFile = async (filePath: string) => {
-    const libId = activeLibraryId();
+  /** 切换来源库筛选。`null` = 全部库。 */
+  const setTrashFilter = (libraryId: string | null) => {
+    setTrashFilterSignal(libraryId);
+    if (currentView().kind === "trash") applyTrashFilter();
+  };
+
+  /**
+   * 某张图属于哪个库。
+   *
+   * 回收站是跨库的逻辑库，条目来自不同库；凡是「按库定位」的操作
+   * （预览、打开、复制、在资源管理器中显示）都必须用条目**自己的**库，
+   * 不能一律用当前活动库，否则对其他库的条目会全部失败。
+   */
+  const libraryIdOfPath = (path: string | null | undefined): string | undefined => {
+    if (path && currentView().kind === "trash") {
+      const hit = deletedFiles().find((f) => f.path === path);
+      if (hit) return hit.library_id;
+    }
+    return activeLibraryId() ?? undefined;
+  };
+
+  const loadDeletedFiles = async () => {
+    setIsLoading(true);
+    try {
+      const payload = await api.getTrash();
+      setDeletedFiles(payload.entries);
+      setTrashSources(payload.sources);
+      setTrashUnavailable(payload.unavailable);
+      // 原来选中的来源库如果已经空了，退回「全部」，别让用户停在空视图上。
+      if (trashFilter() && !payload.sources.some((s) => s.library_id === trashFilter())) {
+        setTrashFilterSignal(null);
+      }
+      applyTrashFilter();
+    } catch {
+      setDeletedFiles([]);
+      setTrashSources([]);
+      setFiles([]);
+      setTotalFiles(0);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  /** 从回收站视图里摘掉若干条目，并按来源库重算筛选条的计数。 */
+  const dropFromTrash = (paths: string[]) => {
+    if (paths.length === 0) return;
+    const gone = new Set(paths);
+    const remaining = deletedFiles().filter((f) => !gone.has(f.path));
+    setDeletedFiles(remaining);
+    setTrashSources((prev) =>
+      prev
+        .map((s) => ({
+          ...s,
+          count: remaining.filter((f) => f.library_id === s.library_id).length,
+        }))
+        .filter((s) => s.count > 0)
+    );
+    if (currentView().kind === "trash") applyTrashFilter();
+  };
+
+  /**
+   * 恢复回收站里的文件回它的**来源库**。
+   *
+   * `libraryId` 必须由调用方从条目上带下来：回收站跨库，不能想当然用当前活动库。
+   */
+  const restoreFile = async (filePath: string, libraryId?: string) => {
+    const libId = libraryId ?? activeLibraryId();
     if (!libId) return;
     await api.restoreFile(libId, filePath);
-    setDeletedFiles((prev) => prev.filter((f) => f.path !== filePath));
-    if (currentView().kind === "trash") {
-      setFiles((prev) => prev.filter((f) => f.path !== filePath));
-      setTotalFiles((p) => p - 1);
-    }
-    syncLibraryCount(totalFiles() + 1);
+    dropFromTrash([filePath]);
+    // 恢复到的是**来源库**，不一定是当前活动库，所以按 id 直接改那个库的计数。
+    setLibraries((prev) =>
+      prev.map((l) => (l.id === libId ? { ...l, file_count: l.file_count + 1 } : l))
+    );
     void loadViewCounts();
   };
 
-  /** Permanently delete a file from trash. */
-  const purgeFile = async (filePath: string) => {
-    const libId = activeLibraryId();
+  /** 彻底删除回收站里的文件（是否连磁盘一起删看设置里的开关）。 */
+  const purgeFile = async (filePath: string, libraryId?: string) => {
+    const libId = libraryId ?? activeLibraryId();
     if (!libId) return;
-    await api.purgeFile(libId, filePath);
-    setDeletedFiles((prev) => prev.filter((f) => f.path !== filePath));
-    if (currentView().kind === "trash") {
-      setFiles((prev) => prev.filter((f) => f.path !== filePath));
-      setTotalFiles((p) => p - 1);
-    }
+    await api.purgeFile(libId, filePath, purgeDeletesDisk());
+    dropFromTrash([filePath]);
     void loadViewCounts();
   };
 
-  /** Permanently delete everything in the trash. */
+  /** 清空回收站 —— 跨所有库。返回删不掉的文件，交给调用方提示。 */
   const emptyTrash = async () => {
-    const libId = activeLibraryId();
-    if (!libId) return;
-    await api.emptyTrash(libId);
+    const result = await api.emptyTrashAll(purgeDeletesDisk());
     setDeletedFiles([]);
+    setTrashSources([]);
     if (currentView().kind === "trash") {
       setFiles([]);
       setTotalFiles(0);
     }
-    // Emptying the trash doesn't change the active file count, but re-sync
-    // to be safe against any drift.
-    syncLibraryCount(totalFiles());
     void loadViewCounts();
+    return result;
   };
 
   /** Update a single file's metadata in the local list (for instant UI feedback). */
@@ -293,7 +362,22 @@ export function useFilesStore() {
   };
 
   /** 侧边栏计数徽标。 */
+  /**
+   * 跨库回收站的总条目数（侧栏徽标）。
+   *
+   * 回收站是逻辑库，不属于任何单一库，所以这个数字不能从 `viewCounts` 里取
+   * —— 那个是按当前活动库算的。后端单独给了一个只 COUNT 的命令。
+   */
+  const loadTrashCount = async () => {
+    try {
+      setTrashTotal(await api.getTrashCount());
+    } catch {
+      // ignore — 徽标是锦上添花
+    }
+  };
+
   const loadViewCounts = async () => {
+    void loadTrashCount();
     const libId = activeLibraryId();
     if (!libId) return;
     try {
@@ -313,6 +397,12 @@ export function useFilesStore() {
     filterExt,
     isLoading,
     deletedFiles,
+    trashSources,
+    trashUnavailable,
+    trashTotal,
+    trashFilter,
+    setTrashFilter,
+    libraryIdOfPath,
     folderTree,
     viewCounts,
     loadFiles,

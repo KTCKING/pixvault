@@ -33,6 +33,35 @@ pub struct FileInfo {
     pub tags: Vec<crate::engine::db::Tag>,
 }
 
+/// 回收站里的一个条目：文件信息 + 它来自哪个库。
+///
+/// 回收站是**逻辑库**，不搬文件、没有自己的目录。每条都带着来源库，
+/// 恢复 / 彻底删除时按 `library_id` 回原库执行，不存在跨库写入。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TrashEntry {
+    #[serde(flatten)]
+    pub file: FileInfo,
+    pub library_id: String,
+    pub library_name: String,
+}
+
+/// 回收站里某个来源库的汇总，用于顶部「全部 / 某个库」筛选条。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TrashSource {
+    pub library_id: String,
+    pub library_name: String,
+    pub count: usize,
+}
+
+/// 回收站一次聚合查询的完整结果。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TrashPayload {
+    pub entries: Vec<TrashEntry>,
+    pub sources: Vec<TrashSource>,
+    /// 读不出来的库名（NAS 离线、盘不在）。UI 需要标注，不能假装它没有回收站。
+    pub unavailable: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PaginatedFiles {
     pub files: Vec<FileInfo>,
@@ -276,6 +305,19 @@ pub async fn trash_files(
     Ok(n)
 }
 
+/// 把 db 层的行转成前端用的 `FileInfo`（顺带取标签）。
+fn entry_to_info(db: &crate::engine::db::Database, e: crate::engine::db::FileEntry) -> FileInfo {
+    let tags = db.get_file_tags(e.id).unwrap_or_default();
+    FileInfo {
+        id: e.id, path: e.path, filename: e.filename, extension: e.extension,
+        size_bytes: e.size_bytes, width: e.width, height: e.height,
+        rating: e.rating, color_label: e.color_label, notes: e.notes,
+        mtime: e.mtime, ctime: e.ctime, created_at: e.created_at, updated_at: e.updated_at,
+        favorite: e.favorite, tags,
+    }
+}
+
+/// 当前库的回收站（保留给内部调用；UI 已改用跨库的 `get_trash`）。
 #[tauri::command]
 pub async fn get_deleted_files(
     library_id: String,
@@ -286,17 +328,86 @@ pub async fn get_deleted_files(
     let lib = lib.lock().unwrap();
 
     let entries = lib.db.get_deleted_files().map_err(|e| e.to_string())?;
-    let files: Vec<FileInfo> = entries.into_iter().map(|e| {
-        let tags = lib.db.get_file_tags(e.id).unwrap_or_default();
-        FileInfo {
-            id: e.id, path: e.path, filename: e.filename, extension: e.extension,
-            size_bytes: e.size_bytes, width: e.width, height: e.height,
-            rating: e.rating, color_label: e.color_label, notes: e.notes,
-            mtime: e.mtime, ctime: e.ctime, created_at: e.created_at, updated_at: e.updated_at,
-            favorite: e.favorite, tags,
+    Ok(entries.into_iter().map(|e| entry_to_info(&lib.db, e)).collect())
+}
+
+/// 跨库聚合回收站 —— 回收站作为「逻辑库」的唯一数据源。
+///
+/// 性能依据：`restore_libraries` 在启动时就把 `libraries.json` 里的每个库都
+/// `open_library` 了一遍，所以 Engine 内存里常驻着全部库的 SQLite 连接。
+/// 这里只是遍历内存里的 map，每个库跑一句走 `idx_files_deleted` 的查询，
+/// 没有冷启动、没有重新建连接。典型 10 个库、几百条记录，耗时在毫秒级。
+///
+/// 某个库读失败（NAS 掉线 / 盘拔了）不整体失败，只记进 `unavailable`，
+/// 让 UI 明确告诉用户「还有一个库现在读不到」，而不是假装它没有回收站。
+#[tauri::command]
+pub async fn get_trash(state: State<'_, AppState>) -> Result<TrashPayload, String> {
+    let engine = state.engine.lock().unwrap();
+
+    // 按用户在侧栏里排好的顺序遍历，回收站里的分组顺序才和侧栏一致。
+    let mut ids: Vec<String> = engine
+        .library_order
+        .iter()
+        .filter(|id| engine.libraries.contains_key(*id))
+        .cloned()
+        .collect();
+    for id in engine.libraries.keys() {
+        if !ids.contains(id) {
+            ids.push(id.clone());
         }
-    }).collect();
-    Ok(files)
+    }
+
+    let mut entries: Vec<TrashEntry> = Vec::new();
+    let mut sources: Vec<TrashSource> = Vec::new();
+    let mut unavailable: Vec<String> = Vec::new();
+
+    for id in ids {
+        let lib = match engine.libraries.get(&id) {
+            Some(l) => l,
+            None => continue,
+        };
+        let lib = lib.lock().unwrap();
+        match lib.db.get_deleted_files() {
+            Ok(list) => {
+                let count = list.len();
+                if count > 0 {
+                    sources.push(TrashSource {
+                        library_id: id.clone(),
+                        library_name: lib.name.clone(),
+                        count,
+                    });
+                    for e in list {
+                        entries.push(TrashEntry {
+                            file: entry_to_info(&lib.db, e),
+                            library_id: id.clone(),
+                            library_name: lib.name.clone(),
+                        });
+                    }
+                }
+            }
+            Err(_) => unavailable.push(lib.name.clone()),
+        }
+    }
+
+    Ok(TrashPayload { entries, sources, unavailable })
+}
+
+/// 校验 path 确实位于库根之内。
+///
+/// `canonicalize` 会解开符号链接并按真实路径比较，所以库内指向库外的软链
+/// 会被拒绝（否则「彻底删除」可能被构造的路径带到库外去删东西）。
+/// 顺带解决「原文件是否还在」—— canonicalize 失败就是文件不在了。
+fn ensure_in_library(lib_root: &std::path::Path, path: &str) -> Result<std::path::PathBuf, String> {
+    let root = lib_root
+        .canonicalize()
+        .map_err(|_| "库目录当前不可访问".to_string())?;
+    let target = std::path::Path::new(path)
+        .canonicalize()
+        .map_err(|_| format!("文件已不在磁盘上：{}", path))?;
+    if !target.starts_with(&root) {
+        return Err("文件不在该库目录内，已拒绝操作".into());
+    }
+    Ok(target)
 }
 
 #[tauri::command]
@@ -308,6 +419,10 @@ pub async fn restore_file(
     let engine = state.engine.lock().unwrap();
     let lib = engine.get_library(&library_id).ok_or("未找到图库")?;
     let lib = lib.lock().unwrap();
+
+    // 恢复前确认文件仍在原位：否则恢复出来只是一条指向空气的记录。
+    // 文件没了就让用户去「彻底删除」把它从库里移除。
+    ensure_in_library(&lib.root_path, &file_path)?;
     lib.db.restore_file(&file_path).map_err(|e| e.to_string())
 }
 
@@ -315,24 +430,117 @@ pub async fn restore_file(
 pub async fn purge_file(
     library_id: String,
     file_path: String,
+    also_delete_disk: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let engine = state.engine.lock().unwrap();
     let lib = engine.get_library(&library_id).ok_or("未找到图库")?;
     let lib = lib.lock().unwrap();
+
+    if also_delete_disk {
+        // 先校验再删：校验不过就整单拒绝，绝不留下「文件删了但记录还在」的中间态。
+        let target = ensure_in_library(&lib.root_path, &file_path)?;
+        std::fs::remove_file(&target)
+            .map_err(|e| format!("删除磁盘文件失败，已保留库内记录：{}", e))?;
+    }
     lib.db.purge_file(&file_path).map_err(|e| e.to_string())
 }
 
-/// Permanently delete every file in the trash (empty the trash).
+/// 跨库回收站的总条目数。
+///
+/// 侧栏的回收站徽标要显示「所有库加起来多少张」，但它不该为此拉全量条目
+/// （`get_trash` 还要逐条取标签）。这里每库只跑一句 `COUNT(*)`，
+/// 走 `idx_files_deleted` 索引，代价可以忽略。
+#[tauri::command]
+pub async fn get_trash_count(state: State<'_, AppState>) -> Result<usize, String> {
+    let engine = state.engine.lock().unwrap();
+    let mut total = 0usize;
+    for lib in engine.libraries.values() {
+        let lib = lib.lock().unwrap();
+        if let Ok(n) = lib.db.count_deleted() {
+            total += n;
+        }
+    }
+    Ok(total)
+}
+
+/// 清空一个库的回收站时返回的汇总。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EmptyTrashResult {
+    /// 从库里移除的记录数。
+    pub removed: usize,
+    /// 删不掉的文件（原样保留记录，用户还能重试）。
+    pub failed: Vec<String>,
+}
+
+/// 清空**一个库**的回收站。
+///
+/// `also_delete_disk = true` 时逐个删磁盘文件，只摘掉删成功的记录；
+/// 删失败的记录保留 —— 「文件还在但记录没了」比「文件没删掉」更难排查。
+fn purge_library_trash(
+    lib: &crate::engine::Library,
+    also_delete_disk: bool,
+) -> Result<EmptyTrashResult, String> {
+    if !also_delete_disk {
+        let removed = lib.db.purge_all_deleted().map_err(|e| e.to_string())?;
+        return Ok(EmptyTrashResult { removed, failed: Vec::new() });
+    }
+
+    let list = lib.db.get_deleted_files().map_err(|e| e.to_string())?;
+    let mut ok_paths: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for e in &list {
+        match ensure_in_library(&lib.root_path, &e.path) {
+            Ok(target) => match std::fs::remove_file(&target) {
+                Ok(_) => ok_paths.push(e.path.clone()),
+                Err(err) => failed.push(format!("{}（{}）", e.path, err)),
+            },
+            Err(err) => failed.push(format!("{}（{}）", e.path, err)),
+        }
+    }
+    let removed = lib.db.purge_paths(&ok_paths).map_err(|e| e.to_string())?;
+    Ok(EmptyTrashResult { removed, failed })
+}
+
 #[tauri::command]
 pub async fn empty_trash(
     library_id: String,
+    also_delete_disk: bool,
     state: State<'_, AppState>,
-) -> Result<usize, String> {
+) -> Result<EmptyTrashResult, String> {
     let engine = state.engine.lock().unwrap();
     let lib = engine.get_library(&library_id).ok_or("未找到图库")?;
     let lib = lib.lock().unwrap();
-    lib.db.purge_all_deleted().map_err(|e| e.to_string())
+    purge_library_trash(&lib, also_delete_disk)
+}
+
+/// 清空**所有库**的回收站 —— 回收站作为逻辑库的「清空」动作。
+///
+/// 单个库失败不影响其他库；读不到的库记进 `unavailable`，由 UI 告知用户。
+#[tauri::command]
+pub async fn empty_trash_all(
+    also_delete_disk: bool,
+    state: State<'_, AppState>,
+) -> Result<EmptyTrashResult, String> {
+    let engine = state.engine.lock().unwrap();
+    let ids: Vec<String> = engine.libraries.keys().cloned().collect();
+
+    let mut removed = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for id in ids {
+        if let Some(lib) = engine.libraries.get(&id) {
+            let lib = lib.lock().unwrap();
+            match purge_library_trash(&lib, also_delete_disk) {
+                Ok(r) => {
+                    removed += r.removed;
+                    // 失败条目带上库名，跨库清空时才分得清是哪个库的文件。
+                    failed.extend(r.failed.into_iter().map(|f| format!("[{}] {}", lib.name, f)));
+                }
+                Err(e) => failed.push(format!("[{}] {}", lib.name, e)),
+            }
+        }
+    }
+    Ok(EmptyTrashResult { removed, failed })
 }
 
 /// 缩略图查询结果。

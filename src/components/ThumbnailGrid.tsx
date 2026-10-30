@@ -258,41 +258,66 @@ export function ThumbnailGrid() {
    * 一起解就是几百 MB 加肉眼可见的卡顿。后台几秒内就会推送结果，等一等远比解
    * 原图划算；而且现在有 32px 模糊占位图垫着，等待期间也不是一片空白。
    */
+  /**
+   * 回收站里「路径 → 来源库」的索引。
+   *
+   * 回收站是跨库的逻辑库，网格里混着不同库的条目。缩略图、data URL 这些
+   * 按库定位的请求，必须用条目**自己的**库，不能一律用当前活动库 ——
+   * 否则别的库的图永远取不到缩略图，整屏都是骨架。
+   */
+  const trashLibMap = createMemo(() => {
+    const m = new Map<string, string>();
+    if (files.currentView().kind !== "trash") return m;
+    for (const f of files.deletedFiles()) m.set(f.path, f.library_id);
+    return m;
+  });
+
+  const libIdOfPath = (p: string): string | undefined =>
+    files.currentView().kind === "trash" ? trashLibMap().get(p) : (activeLibraryId() ?? undefined);
+
   const flushWindow = async () => {
-    const libId = activeLibraryId();
-    if (!libId || disposed) return;
+    if (disposed) return;
 
     // 顺手剔除已经不在列表里的残留（过滤 / 搜索 / 换页都会产生）。
-    const win: string[] = [];
+    // 按来源库分组：一个库只认自己目录下的路径。
+    const byLib = new Map<string, string[]>();
     for (const p of visiblePaths) {
       if (!livePaths.has(p)) {
         visiblePaths.delete(p);
         continue;
       }
       // 视频没有缩略图可等（卡片自己画播放角标），塞进请求只会白占一个名额
-      if (!isVideoPath(p)) win.push(p);
+      if (isVideoPath(p)) continue;
+      const lib = libIdOfPath(p);
+      if (!lib) continue;
+      const arr = byLib.get(lib);
+      if (arr) arr.push(p);
+      else byLib.set(lib, [p]);
     }
-    if (win.length === 0) return;
+    if (byLib.size === 0) return;
 
-    try {
-      const items = await api.getThumbnails(libId, win, win);
-      if (loggedWindows < LOG_WINDOWS) {
-        loggedWindows += 1;
-        const pending = items.filter((i) => i.status === "pending").length;
-        const withPh = items.filter((i) => i.placeholder).length;
-        void api.diagLog(
-          "window",
-          `${items.length} 张 · 命中 ${items.length - pending} · 待生成 ${pending} · 带占位 ${withPh}`,
-        );
+    for (const [lib, paths] of byLib) {
+      if (disposed) return;
+      try {
+        const items = await api.getThumbnails(lib, paths, paths);
+        if (loggedWindows < LOG_WINDOWS) {
+          loggedWindows += 1;
+          const pending = items.filter((i) => i.status === "pending").length;
+          const withPh = items.filter((i) => i.placeholder).length;
+          void api.diagLog(
+            "window",
+            `${items.length} 张 · 命中 ${items.length - pending} · 待生成 ${pending} · 带占位 ${withPh}`,
+          );
+        }
+        for (const it of items) {
+          if (it.placeholder) setPlaceholderUrl(it.path, it.placeholder);
+          if (it.status === "ready") setThumbUrl(it.path, it.thumb);
+          else if (it.status === "fallback") setThumbUrl(it.path, it.path);
+          // pending：什么都不做，等后台的 thumb-placeholder / thumb-ready 推回来。
+        }
+      } catch (err) {
+        void api.diagLog("window", `ERROR ${String(err)} ${trail(paths[0] ?? "")}`);
       }
-      for (const it of items) {
-        if (it.placeholder) setPlaceholderUrl(it.path, it.placeholder);
-        if (it.status === "ready") setThumbUrl(it.path, it.thumb);
-        else if (it.status === "fallback") setThumbUrl(it.path, it.path);
-        // pending：什么都不做，等后台的 thumb-placeholder / thumb-ready 推回来。
-      }
-    } catch (err) {
-      void api.diagLog("window", `ERROR ${String(err)} ${trail(win[0] ?? "")}`);
     }
   };
 
@@ -479,26 +504,37 @@ export function ThumbnailGrid() {
    * 会把当前视口里正在排队的任务错误地降级掉。
    */
   const resyncMissing = async (missing: string[]) => {
-    const libId = activeLibraryId();
-    if (!libId) return;
     // 视频永远「缺缩略图」，不过滤掉的话每轮补齐都会白问一遍，而且会一直
     // 触发下一轮重扫。
     missing = missing.filter((p) => !isVideoPath(p));
     if (missing.length === 0) return;
-    for (let i = 0; i < missing.length; i += RESYNC_CHUNK) {
-      if (disposed) return;
-      try {
-        const items = await api.getThumbnails(libId, missing.slice(i, i + RESYNC_CHUNK));
-        for (const it of items) {
-          if (it.placeholder) setPlaceholderUrl(it.path, it.placeholder);
-          if (it.status === "ready") setThumbUrl(it.path, it.thumb);
-          else if (it.status === "fallback") setThumbUrl(it.path, it.path);
+
+    // 同样按来源库分组：跨库回收站里不同库的路径不能混着问。
+    const byLib = new Map<string, string[]>();
+    for (const p of missing) {
+      const lib = libIdOfPath(p);
+      if (!lib) continue;
+      const arr = byLib.get(lib);
+      if (arr) arr.push(p);
+      else byLib.set(lib, [p]);
+    }
+
+    for (const [lib, paths] of byLib) {
+      for (let i = 0; i < paths.length; i += RESYNC_CHUNK) {
+        if (disposed) return;
+        try {
+          const items = await api.getThumbnails(lib, paths.slice(i, i + RESYNC_CHUNK));
+          for (const it of items) {
+            if (it.placeholder) setPlaceholderUrl(it.path, it.placeholder);
+            if (it.status === "ready") setThumbUrl(it.path, it.thumb);
+            else if (it.status === "fallback") setThumbUrl(it.path, it.path);
+          }
+        } catch (err) {
+          void api.diagLog("resync", `ERROR ${String(err)}`);
+          return;
         }
-      } catch (err) {
-        void api.diagLog("resync", `ERROR ${String(err)}`);
-        return;
+        await new Promise((r) => setTimeout(r, 0));
       }
-      await new Promise((r) => setTimeout(r, 0));
     }
   };
 
@@ -508,7 +544,7 @@ export function ThumbnailGrid() {
    * 不至于全是空白。
    */
   const fallbackToDataUrl = async (filePath: string): Promise<boolean> => {
-    const libId = activeLibraryId();
+    const libId = libIdOfPath(filePath);
     if (!libId) return false;
     try {
       const dataUrl = await api.readThumbDataUrl(libId, filePath);
@@ -821,10 +857,13 @@ export function ThumbnailGrid() {
       files.setSelection([path]);
       paths = [path];
     }
+    // 回收站里的条目要用回收站专用菜单：那里只有「恢复 / 彻底删除」，
+    // 给它常规文件菜单会冒出「移入回收站」这种在回收站里没有意义的项。
+    const inTrash = files.currentView().kind === "trash";
     ui.setContextMenu({
       x: e.clientX,
       y: e.clientY,
-      target: { kind: "files", paths },
+      target: inTrash ? { kind: "trash", paths } : { kind: "files", paths },
     });
   };
 
@@ -889,6 +928,28 @@ export function ThumbnailGrid() {
 
         <div class="flex-1" />
 
+        {/* 回收站是跨库的逻辑库，这里给出「来源库」筛选，等价于库内的文件夹分组。 */}
+        <Show when={files.currentView().kind === "trash" && files.trashSources().length > 0}>
+          <select
+            class="text-xs rounded px-1.5 py-0.5"
+            style={{
+              background: "var(--bg-elevated)",
+              color: s.text,
+              border: `1px solid ${s.border}`,
+            }}
+            value={files.trashFilter() ?? ""}
+            onChange={(e) => files.setTrashFilter(e.currentTarget.value || null)}
+            title="按来源库筛选回收站"
+          >
+            <option value="">
+              全部库 · {files.trashSources().reduce((n, x) => n + x.count, 0)}
+            </option>
+            <For each={files.trashSources()}>
+              {(src) => <option value={src.library_id}>{src.library_name} · {src.count}</option>}
+            </For>
+          </select>
+        </Show>
+
         {/* 当前视图（智能视图 / 文件夹 / 颜色 / 标签 / 回收站） */}
         <span class="text-xs font-medium" style={{ color: s.text }} title={viewLabel()}>
           {viewLabel()}
@@ -951,11 +1012,18 @@ export function ThumbnailGrid() {
               <p class="text-sm">
                 {files.currentView().kind === "recent"
                   ? `最近${ui.recentWindow() === "month" ? "一个月" : "一周"}没有新导入的图片`
-                  : "暂无图片"}
+                  : files.currentView().kind === "trash"
+                    ? "所有库的回收站都是空的"
+                    : "暂无图片"}
               </p>
               <Show when={files.currentView().kind === "recent"}>
                 <p class="text-xs mt-1.5" style={{ color: s.muted }}>
                   可以在设置里把「最近新增」的时间窗口改成最近一个月
+                </p>
+              </Show>
+              <Show when={files.currentView().kind === "trash" && files.trashUnavailable().length > 0}>
+                <p class="text-xs mt-1.5" style={{ color: s.muted }}>
+                  另有 {files.trashUnavailable().join("、")} 当前读不到，可能不在线
                 </p>
               </Show>
             </div>

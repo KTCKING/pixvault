@@ -185,6 +185,10 @@ export function ContextMenu() {
     // trash (soft-deleted files) menu
     if (t.kind === "trash") {
       const paths = t.paths;
+      // 回收站跨库，每条要带着自己的来源库回去执行，不能用当前活动库。
+      const libIdOf = (p: string) =>
+        files.deletedFiles().find((f) => f.path === p)?.library_id;
+      const alsoDisk = () => ui.purgeDeletesDisk();
       // Right-click on the trash entry itself (no specific file) → empty-all.
       if (paths.length === 0) {
         return [
@@ -208,14 +212,21 @@ export function ContextMenu() {
                 ui.showToast("回收站已经是空的", "info");
                 return;
               }
+              const disk = alsoDisk();
               ui.requestConfirm({
                 title: "清空回收站",
-                message: `确定要彻底删除回收站中的 ${n} 个文件吗？此操作不可恢复。`,
-                confirmText: "彻底删除",
+                message: disk
+                  ? `将删除所有库回收站里的 ${n} 个文件，并连同磁盘上的原文件一起删除。此操作不可恢复。`
+                  : `将把 ${n} 个文件从库中移除，磁盘上的原文件会保留。`,
+                confirmText: disk ? "删除并清理磁盘" : "从库中移除",
                 danger: true,
                 onConfirm: async () => {
-                  await files.emptyTrash();
-                  ui.showToast("回收站已清空");
+                  const r = await files.emptyTrash();
+                  if (r.failed.length > 0) {
+                    ui.showToast(`已清空 ${r.removed} 个，${r.failed.length} 个未能删除`, "error");
+                  } else {
+                    ui.showToast("回收站已清空");
+                  }
                 },
               });
             },
@@ -227,7 +238,7 @@ export function ContextMenu() {
           label: "恢复",
           icon: <IconUndo size={15} />,
           onClick: async () => {
-            for (const p of paths) await files.restoreFile(p);
+            for (const p of paths) await files.restoreFile(p, libIdOf(p));
             ui.showToast(paths.length > 1 ? `已恢复 ${paths.length} 张` : "已恢复");
             close();
           },
@@ -237,9 +248,20 @@ export function ContextMenu() {
           icon: <IconTrashX size={15} />,
           danger: true,
           onClick: async () => {
-            for (const p of paths) await files.purgeFile(p);
-            ui.showToast("已彻底删除");
             close();
+            const disk = alsoDisk();
+            ui.requestConfirm({
+              title: "彻底删除",
+              message: disk
+                ? `将删除 ${paths.length} 个文件及其磁盘上的原文件，不可恢复。`
+                : `将把 ${paths.length} 个文件从库中移除，磁盘上的原文件保留。`,
+              confirmText: disk ? "删除并清理磁盘" : "从库中移除",
+              danger: true,
+              onConfirm: async () => {
+                for (const p of paths) await files.purgeFile(p, libIdOf(p));
+                ui.showToast(disk ? "已删除并清理磁盘文件" : "已从库中移除");
+              },
+            });
           },
         },
       ];

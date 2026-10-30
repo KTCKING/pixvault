@@ -1,7 +1,7 @@
 import { createSignal, Show, For, createResource, createEffect, on, onMount, onCleanup } from "solid-js";
 import type { JSX } from "solid-js";
 import { api, COLOR_LABELS } from "@/lib/tauri-api";
-import { activeLibraryId, useLibraryStore } from "@/stores/library";
+import { useLibraryStore } from "@/stores/library";
 import { useTagsStore } from "@/stores/tags";
 import { useFilesStore } from "@/stores/files";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -86,8 +86,9 @@ export function InfoPanel(props: Props) {
   /** 快速切换文件时，丢弃迟到的响应，避免预览栏串成上一张图。 */
   let previewToken = 0;
 
+  // 回收站跨库：这里必须按条目自己的库取详情，不能用当前活动库。
   const [fileInfo, { refetch }] = createResource(
-    () => ({ libId: activeLibraryId(), path: props.filePath }),
+    () => ({ libId: props.filePath ? files.libraryIdOfPath(props.filePath) : undefined, path: props.filePath }),
     async ({ libId, path }) => {
       if (!libId || !path) return null;
       return api.getFileInfo(libId, path);
@@ -130,7 +131,7 @@ export function InfoPanel(props: Props) {
    * 2400 张全量生成就是 600 MB，而绝大多数图一辈子不会被点开。
    */
   createEffect(() => {
-    const libId = activeLibraryId();
+    const libId = files.libraryIdOfPath(props.filePath);
     const path = props.filePath;
     const token = ++previewToken;
     setPreviewUrl(null);
@@ -170,7 +171,7 @@ export function InfoPanel(props: Props) {
   const handlePreviewError = async (e: Event) => {
     const el = e.currentTarget as HTMLImageElement;
     const path = props.filePath;
-    const libId = activeLibraryId();
+    const libId = files.libraryIdOfPath(props.filePath);
     void api.diagLog("preview", `load-error src=${el.src.slice(0, 90)}`);
     setPreviewUrl(null); // 这张的 1600px 预览加载不了，退回更小的图
     if (!path || !libId || previewDataUrl()) {
@@ -214,7 +215,7 @@ export function InfoPanel(props: Props) {
   const parentDir = (path: string) => path.replace(/[\\/][^\\/]*$/, "") || path;
 
   const handleSaveNotes = async () => {
-    const libId = activeLibraryId();
+    const libId = files.libraryIdOfPath(props.filePath);
     if (!libId || !props.filePath) return;
     setBusy(true);
     try {
@@ -227,7 +228,7 @@ export function InfoPanel(props: Props) {
   };
 
   const handleRating = async (star: number) => {
-    const libId = activeLibraryId();
+    const libId = files.libraryIdOfPath(props.filePath);
     if (!libId || !props.filePath) return;
     const current = fileInfo()?.rating || 0;
     await api.updateFileRating(libId, props.filePath, current >= star ? 0 : star);
@@ -247,7 +248,7 @@ export function InfoPanel(props: Props) {
   };
 
   const handleAddTag = async (tagId: number) => {
-    const libId = activeLibraryId();
+    const libId = files.libraryIdOfPath(props.filePath);
     if (!libId || !props.filePath) return;
     setBusy(true);
     try {
@@ -260,7 +261,7 @@ export function InfoPanel(props: Props) {
   };
 
   const handleRemoveTag = async (tagId: number) => {
-    const libId = activeLibraryId();
+    const libId = files.libraryIdOfPath(props.filePath);
     if (!libId || !props.filePath) return;
     setBusy(true);
     try {
