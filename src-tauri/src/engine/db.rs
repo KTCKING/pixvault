@@ -343,6 +343,29 @@ impl Database {
         }
     }
 
+    /// 按路径取文件，**不过滤删除标记**。
+    ///
+    /// 回收站里的条目是 `is_deleted = 1`，用 [`get_file_by_path`] 永远查不到。
+    /// 缩略图 / 预览图 / 信息面板都要在回收站里正常工作，所以「按路径定位一条
+    /// 索引」的读操作必须走这里 —— 否则会被判成「库里没有这张」，请求被丢进
+    /// `unknown` 只回一个 pending，前端等不到任何事件，骨架屏永久停留。
+    pub fn get_file_by_path_any(&self, path: &str) -> SqlResult<Option<FileEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, filename, extension, size_bytes, width, height, 
+                    blake3_hash, phash, mtime, ctime, rating, color_label, notes, 
+                    is_deleted, created_at, updated_at, favorite
+             FROM files WHERE path = ?1"
+        )?;
+
+        let mut rows = stmt.query_map(params![path], Self::row_to_entry)?;
+
+        match rows.next() {
+            Some(Ok(entry)) => Ok(Some(entry)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
     /// 组装 WHERE 子句与参数（files 表别名 `f`）。
     fn build_where(filter: &FileFilter) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
         let mut sql = String::new();

@@ -1,6 +1,6 @@
 {
   "name": "pixvault",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Resource-library style image management desktop app",
   "private": true,
   "type": "module",

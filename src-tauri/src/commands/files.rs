@@ -138,7 +138,7 @@ pub async fn get_file_info(
     let lib = engine.get_library(&library_id).ok_or("未找到图库")?;
     let lib = lib.lock().unwrap();
 
-    let entry = lib.db.get_file_by_path(&file_path)
+    let entry = lib.db.get_file_by_path_any(&file_path)
         .map_err(|e| e.to_string())?
         .ok_or("未找到文件")?;
     let tags = lib.db.get_file_tags(entry.id).unwrap_or_default();
@@ -662,7 +662,7 @@ pub async fn get_thumbnail_path(
 
         let entry = lib
             .db
-            .get_file_by_path(&file_path)
+            .get_file_by_path_any(&file_path)
             .map_err(|e| e.to_string())?
             .ok_or("未找到文件")?;
 
@@ -748,7 +748,9 @@ pub async fn get_thumbnails(
                 continue;
             }
 
-            let Some(entry) = lib.db.get_file_by_path(file_path).map_err(|e| e.to_string())? else {
+            // 回收站里的条目 is_deleted = 1，必须用不过滤删除标记的那版查询，
+            // 否则整屏缩略图都会被判成「库里没有这张」而永久骨架屏。
+            let Some(entry) = lib.db.get_file_by_path_any(file_path).map_err(|e| e.to_string())? else {
                 unknown.push(file_path.clone());
                 continue;
             };
@@ -838,7 +840,7 @@ pub async fn get_preview_path(
 
         let entry = lib
             .db
-            .get_file_by_path(&file_path)
+            .get_file_by_path_any(&file_path)
             .map_err(|e| e.to_string())?
             .ok_or("未找到文件")?;
 
@@ -895,7 +897,7 @@ pub async fn read_thumb_data_url(
 
         let entry = lib
             .db
-            .get_file_by_path(&file_path)
+            .get_file_by_path_any(&file_path)
             .map_err(|e| e.to_string())?
             .ok_or("未找到文件")?;
 
