@@ -4,6 +4,7 @@ import { api, COLOR_LABELS } from "@/lib/tauri-api";
 import { useLibraryStore } from "@/stores/library";
 import { useTagsStore } from "@/stores/tags";
 import { useFilesStore } from "@/stores/files";
+import { useUIStore } from "@/stores/ui";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { thumbUrl, toDisplaySrc } from "@/lib/thumbs";
@@ -70,6 +71,7 @@ export function InfoPanel(props: Props) {
   const tags = useTagsStore();
   const files = useFilesStore();
   const library = useLibraryStore();
+  const ui = useUIStore();
 
   const [notes, setNotes] = createSignal("");
   const [editingNotes, setEditingNotes] = createSignal(false);
@@ -215,6 +217,7 @@ export function InfoPanel(props: Props) {
   const parentDir = (path: string) => path.replace(/[\\/][^\\/]*$/, "") || path;
 
   const handleSaveNotes = async () => {
+    if (blockedByTrash()) return;
     const libId = files.libraryIdOfPath(props.filePath);
     if (!libId || !props.filePath) return;
     setBusy(true);
@@ -227,7 +230,19 @@ export function InfoPanel(props: Props) {
     }
   };
 
+  /**
+   * 回收站里的文件是软删状态（`is_deleted = 1`），后端的编辑类命令都按
+   * 「未删除的正常文件」定位索引，一律返回「未找到文件」。在这里统一拦一道，
+   * 给一句人话提示，而不是让用户吃一个后端错误。
+   */
+  const blockedByTrash = (): boolean => {
+    if (files.currentView().kind !== "trash") return false;
+    ui.showToast("回收站里的文件需先恢复才能编辑", "info");
+    return true;
+  };
+
   const handleRating = async (star: number) => {
+    if (blockedByTrash()) return;
     const libId = files.libraryIdOfPath(props.filePath);
     if (!libId || !props.filePath) return;
     const current = fileInfo()?.rating || 0;
@@ -236,18 +251,21 @@ export function InfoPanel(props: Props) {
   };
 
   const handleFavorite = async (favorite: boolean) => {
+    if (blockedByTrash()) return;
     if (!props.filePath) return;
     await files.setFavorite(props.filePath, favorite);
     await refetch();
   };
 
   const handleColor = async (color: string | null) => {
+    if (blockedByTrash()) return;
     if (!props.filePath) return;
     await files.setColor(props.filePath, color);
     await refetch();
   };
 
   const handleAddTag = async (tagId: number) => {
+    if (blockedByTrash()) return;
     const libId = files.libraryIdOfPath(props.filePath);
     if (!libId || !props.filePath) return;
     setBusy(true);
@@ -261,6 +279,7 @@ export function InfoPanel(props: Props) {
   };
 
   const handleRemoveTag = async (tagId: number) => {
+    if (blockedByTrash()) return;
     const libId = files.libraryIdOfPath(props.filePath);
     if (!libId || !props.filePath) return;
     setBusy(true);
