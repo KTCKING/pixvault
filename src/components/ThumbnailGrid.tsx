@@ -54,6 +54,26 @@ const CONTAINER_PAD = 12;
 const LIST_ROW_H = 58;
 /** 可见范围上下各多渲染几行，避免快速滚动时露出空白。 */
 const OVERSCAN_ROWS = 2;
+/** 瀑布流的预渲染边距（像素）—— 列高不等，按行算不了，改用像素。 */
+const OVERSCAN_PX = 420;
+
+/**
+ * 卡片文字区高度：文件名 + 尺寸那一行。
+ *
+ * `ThumbnailCard` 的根节点是「图片区 + 这 40px」，布局算高度时必须和它对齐，
+ * 否则每张卡的实际占位会比算出来的高一截，底部会累积出一段空白。
+ */
+const CARD_FOOTER_H = 40;
+
+/**
+ * 瀑布流图片区高度相对列宽的上下限。
+ *
+ * 不设限的话，一张 200×3000 的长截图会排出 15 倍列高的卡片，滚一屏只有半张图；
+ * 反过来一张 3000×200 的全景图会薄成一条线。夹在 0.5–3.0 之间：绝大多数
+ * 竖构图 / 横构图都落在区间内（完整显示、不裁切），只有极端长宽比才会被裁。
+ */
+const MIN_H_RATIO = 0.5;
+const MAX_H_RATIO = 3.0;
 
 /** 日志里只留路径尾部，避免整条路径刷屏。 */
 const trail = (p: string, n = 42): string => (p.length > n ? `…${p.slice(-n)}` : p);
@@ -345,29 +365,41 @@ export function ThumbnailGrid() {
   }
 
   /**
-   * 瀑布流里的一张卡片。
+   * 瀑布流里的一张卡片（位置是**预计算**出来的，不是渲染时算的）。
    *
-   * 刻意**只放稳定的字段**（`file` 引用 + 全局下标），列号和行号由
-   * `MasonryLayout.place()` 现算 —— 见下面 `masonry()` 里关于 `For` 复用的说明。
+   * 对象只在布局重算时重建，滚动时切片只做「挑出可见的那些」，引用保持稳定 ——
+   * 否则 Solid 的 `<For>` 每帧都会把整屏卡片拆掉重建，图片闪成一片。
    */
   interface MasonryCell {
     file: FileInfo;
     /** 全局下标 —— 双击进查看器要用它，切片下标是错的。 */
     index: number;
+    /** 所在列。 */
+    col: number;
+    /** 卡片顶部的纵向偏移（含间距）。 */
+    y: number;
+    /** 图片区高度（不含底部 40px 的文字区）。 */
+    imageHeight: number;
   }
 
+  /** 整库的瀑布流布局：位置全部算好，只等视口来取。 */
+  interface MasonryBoard {
+    /** 每列的卡片，按 `y` 升序 —— 切片靠它二分。 */
+    byColumn: MasonryCell[][];
+    /** 按全局下标索引，锚点定位（开合信息面板）要用。 */
+    byIndex: MasonryCell[];
+    columns: number;
+    columnWidth: number;
+    /** 滚动总高度 = 最高那一列的长度。 */
+    totalHeight: number;
+  }
+
+  /** 当前视口要渲染的那一小撮。 */
   interface MasonryLayout {
-    /** 本次要渲染的卡片（仅可见 ± 2 行，按列分组）。 */
     cells: MasonryCell[];
-    /** 整个列表撑起的滚动高度 = 行数 × 行高。 */
     totalHeight: number;
     columns: number;
-    /** 单列宽度（px），渲染时用来算 left。 */
     columnWidth: number;
-    /** 行高 = 卡片高度（`size + 40`）+ 间距。 */
-    rowHeight: number;
-    /** 全局下标 → 该卡片落在第几列第几行。 */
-    place: (index: number) => { col: number; row: number };
   }
 
   /** 把容器的滚动位置与尺寸同步进信号（同一帧内的多次调用合并成一次）。 */
@@ -423,92 +455,147 @@ export function ThumbnailGrid() {
   });
 
   /**
-   * 瀑布流的虚拟化布局。
+   * 容器宽度（单独套一层 memo）。
    *
-   * 以前这里是一句 `<For each={files.files()}>` + CSS `columns`：几千张图就是
-   * 几千个卡片 DOM、几千个 IntersectionObserver，在软件渲染的机器上切到这个
-   * 模式立刻卡住，而且窗口集合只能靠观察器回调慢慢收敛（越滑越卡、越滑越慢）。
-   *
-   * 之前的注释说「瀑布流列高不均算不出行位置」，其实是个误判：卡片高度是
-   * **固定**的（`ThumbnailCard` 根节点写死 `size + 40`，图片区 `object-cover`
-   * 裁切），所以每一行的高度完全一样，和网格没有区别 —— 唯一的差异是填充方向：
-   * 网格横向填（一行一行），瀑布流纵向填（先填满第一列）。
-   *
-   * 因此切片逻辑可以直接沿用网格那套「按行区间取」，只是把「行 → 连续下标」
-   * 换成「列 × 行 → 该列起点 + 行号」。而 CSS `columns` 默认 `column-fill:
-   * balance` 会把条目**均分**给各列（前 `total % columns` 列各多一张），所以
-   * 每列的起点不是 `col * rows`，必须按均分后的边界累加，否则切换前后顺序会乱。
-   *
-   * 列数也改成按**容器**宽度算。原来用 `window.innerWidth`，信息面板一开
-   * 网格变窄而列数不变，卡片就会横向溢出。
-   *
-   * 为什么 `cells` 里只放 `{ file, index }`、位置靠 `place()` 现算：
-   * Solid 的 `<For>` 按**元素引用**做 diff，如果每次滚动都返回一批新建的
-   * `{ file, col, row }` 对象，引用全变 → 整屏卡片被拆掉重建，图片会闪一下。
-   * 只放稳定的 `file` 引用，`For` 就只增删真正进出视口的那些；列 / 行写在
-   * `style` 里的表达式调用 `place()`，它读 `m()`，所以列数变化（面板开合、
-   * 拖窗口）时位置仍会自动更新。
+   * 布局只关心宽度，可 `viewport()` 里还装着 `scrollTop` —— 直接读它，每滚一下就
+   * 会重算整库布局（几千张）。套一层后，Solid 的「值相等就不通知下游」会把
+   * 「只是滚了一下」挡在外面，布局只在窗口真的变宽变窄时重算。
    */
-  const masonryCellCache = new Map<number, MasonryCell>();
+  const containerWidth = createMemo(() => viewport().width);
 
-  const masonry = createMemo<MasonryLayout | null>(() => {
-    if (ui.viewMode() !== "masonry") return null;
+  /** 图片的「高 / 宽」比。没有尺寸信息的（RAW、老数据）按 4:3 兜底。 */
+  const aspectOf = (f: FileInfo): number => {
+    const w = f.width;
+    const h = f.height;
+    return w && h && w > 0 && h > 0 ? h / w : 0.75;
+  };
+
+  /**
+   * 瀑布流布局：把整个列表**一次算完**，得到每张卡的 (列, y, 图片高度)。
+   *
+   * 算法是「最短列优先」贪心 —— 每张图塞进当前最矮的那一列。单张高度来自数据库
+   * 里的真实宽高比（`列宽 × height / width`），所以竖构图真的比横构图高，这才是
+   * 瀑布流和网格的区别。O(n) 一次算完，之后滚动只做二分查找。
+   *
+   * 分页追加做了增量：新列表若是旧列表的**前缀扩展**且列参数没变，就只算新增的。
+   * 否则每拉到下一页都要重排几千张、重建整屏 DOM，滑到底会闪。
+   */
+  let boardCache: {
+    list: FileInfo[];
+    columns: number;
+    columnWidth: number;
+    byColumn: MasonryCell[][];
+    byIndex: MasonryCell[];
+    colLens: number[];
+  } | null = null;
+
+  const masonryBoard = createMemo<MasonryBoard | null>(() => {
+    if (ui.viewMode() !== "masonry") {
+      boardCache = null;
+      return null;
+    }
 
     const list = files.files();
     const total = list.length;
-    const v = viewport();
+    const width = containerWidth();
     const card = ui.thumbnailSize();
-    if (total === 0 || v.width <= 0 || v.height <= 0) return null;
+    if (total === 0 || width <= 0) return null;
 
-    const inner = Math.max(card, v.width - CONTAINER_PAD * 2);
-    const columns = Math.max(1, Math.floor((inner + GRID_GAP) / (card + GRID_GAP)));
+    const inner = Math.max(card, width - CONTAINER_PAD * 2);
+    const columns = Math.max(1, Math.round((inner + GRID_GAP) / (card + GRID_GAP)));
     const columnWidth = Math.max(1, (inner - GRID_GAP * (columns - 1)) / columns);
-    const rowHeight = card + 40 + GRID_GAP;
-    const rows = Math.ceil(total / columns);
 
-    // `column-fill: balance` 的均分边界：前 rem 列各多一张。
-    const base = Math.floor(total / columns);
-    const rem = total % columns;
-    const starts: number[] = [];
-    for (let col = 0; col < columns; col++) starts.push(col * base + Math.min(col, rem));
-    const countOf = (col: number) => base + (col < rem ? 1 : 0);
+    const cache = boardCache;
+    const appended =
+      cache !== null &&
+      cache.columns === columns &&
+      Math.abs(cache.columnWidth - columnWidth) < 0.01 &&
+      total >= cache.list.length &&
+      cache.list.every((f, i) => list[i] === f);
 
-    const place = (index: number) => {
+    let byColumn: MasonryCell[][];
+    let byIndex: MasonryCell[];
+    let colLens: number[];
+    let from = 0;
+
+    if (appended && cache) {
+      byColumn = cache.byColumn;
+      byIndex = cache.byIndex;
+      colLens = cache.colLens;
+      from = cache.list.length;
+    } else {
+      byColumn = Array.from({ length: columns }, () => [] as MasonryCell[]);
+      byIndex = new Array<MasonryCell>(total);
+      colLens = new Array(columns).fill(0);
+    }
+
+    for (let i = from; i < total; i++) {
+      const file = list[i];
+      const raw = columnWidth * aspectOf(file);
+      const imageHeight = Math.min(
+        Math.max(raw, columnWidth * MIN_H_RATIO),
+        columnWidth * MAX_H_RATIO,
+      );
+
+      // 最短列优先；等高时取索引小的，保证布局稳定可复现。
       let col = 0;
-      for (let c = columns - 1; c >= 0; c--) {
-        if (starts[c] <= index) { col = c; break; }
-      }
-      return { col, row: index - starts[col] };
-    };
+      for (let c = 1; c < columns; c++) if (colLens[c] < colLens[col]) col = c;
 
-    const firstRow = Math.max(0, Math.floor(v.top / rowHeight) - OVERSCAN_ROWS);
-    const lastRow = Math.min(rows, Math.ceil((v.top + v.height) / rowHeight) + OVERSCAN_ROWS);
+      const y = colLens[col];
+      const cell: MasonryCell = { file, index: i, col, y, imageHeight };
+      byColumn[col].push(cell);
+      byIndex[i] = cell;
+      colLens[col] = y + imageHeight + CARD_FOOTER_H + GRID_GAP;
+    }
+
+    boardCache = { list, columns, columnWidth, byColumn, byIndex, colLens };
+
+    const tallest = colLens.reduce((a, b) => (b > a ? b : a), 0);
+    return {
+      byColumn,
+      byIndex,
+      columns,
+      columnWidth,
+      totalHeight: Math.max(0, tallest - GRID_GAP),
+    };
+  });
+
+  /**
+   * 从整库布局里切出「视口 ± 预渲染边距」的那些卡片。
+   *
+   * 每列内部 `y` 天然升序，所以先二分找到第一张「底边还没被滚出上边界」的卡，
+   * 再顺序扫到越过下边界为止 —— 每列 O(log n + 可见数)，代价和库有多大无关。
+   */
+  const masonry = createMemo<MasonryLayout | null>(() => {
+    const board = masonryBoard();
+    if (!board) return null;
+
+    const v = viewport();
+    const top = v.top - OVERSCAN_PX;
+    const bottom = v.top + v.height + OVERSCAN_PX;
 
     const cells: MasonryCell[] = [];
-    for (let col = 0; col < columns; col++) {
-      const start = starts[col];
-      const count = countOf(col);
-      for (let row = firstRow; row < lastRow && row < count; row++) {
-        const index = start + row;
-        const file = list[index];
-        if (!file) continue;
-        // 同一 index 但文件换了（排序 / 过滤后列表整体变化）就丢掉旧对象。
-        let cell = masonryCellCache.get(index);
-        if (!cell || cell.file !== file) {
-          cell = { file, index };
-          masonryCellCache.set(index, cell);
-        }
-        cells.push(cell);
+    for (const column of board.byColumn) {
+      let lo = 0;
+      let hi = column.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        const c = column[mid];
+        if (c.y + c.imageHeight + CARD_FOOTER_H < top) lo = mid + 1;
+        else hi = mid;
+      }
+      for (let i = lo; i < column.length; i++) {
+        const c = column[i];
+        if (c.y > bottom) break;
+        cells.push(c);
       }
     }
 
     return {
       cells,
-      totalHeight: Math.max(0, rows * rowHeight),
-      columns,
-      columnWidth,
-      rowHeight,
-      place,
+      totalHeight: board.totalHeight,
+      columns: board.columns,
+      columnWidth: board.columnWidth,
     };
   });
 
@@ -556,13 +643,6 @@ export function ThumbnailGrid() {
   let anchorPath: string | null = null;
   let anchorRaf = 0;
 
-  const findCardEl = (root: HTMLElement, path: string): HTMLElement | null => {
-    const esc = typeof CSS !== "undefined" && CSS.escape
-      ? CSS.escape(path)
-      : path.replace(/["\\]/g, "\\$&");
-    return root.querySelector<HTMLElement>(`[data-path="${esc}"]`);
-  };
-
   const keepFocusedInPlace = () => {
     const c = containerRef;
     // 关面板时 onClose 会先把 infoPanelFile 清空，所以退回"最后打开过的那张"
@@ -570,17 +650,25 @@ export function ThumbnailGrid() {
     if (!c || !path) return;
     anchorPath = path;
 
-    const v = virtual();
-    if (!v) {
-      // 瀑布流没有虚拟化（CSS columns 列高不均算不出行位置）→ 用元素实测位置兜底
-      const el = findCardEl(c, path);
-      if (!el) return;
-      const cr = c.getBoundingClientRect();
-      const er = el.getBoundingClientRect();
-      if (er.top < cr.top) c.scrollTop += er.top - cr.top - GRID_GAP;
-      else if (er.bottom > cr.bottom) c.scrollTop += er.bottom - cr.bottom + GRID_GAP;
+    const v = ui.viewMode() === "masonry" ? null : virtual();
+
+    if (ui.viewMode() === "masonry") {
+      // 瀑布流：列数一变，同一张图的 y 就变了，但只要让它离视口**顶部的距离
+      // 保持不变**，视觉上就是完全没动过。比「实测元素位置再滚回来」稳 ——
+      // 面板开合后那张卡很可能已经滑出渲染范围，DOM 里根本查不到。
+      const idx = files.files().findIndex((f) => f.path === path);
+      const before = idx >= 0 ? masonryBoard()?.byIndex[idx] : undefined;
+      if (!before) return;
+      const offset = before.y - c.scrollTop;
+      syncViewport();                                    // 新宽度进信号 → 布局重算
+      const after = masonryBoard()?.byIndex[idx];
+      if (!after) return;
+      c.scrollTop = Math.max(0, after.y - offset);
+      syncViewport();                                    // 切片立刻跟上
       return;
     }
+
+    if (!v) return;
 
     const list = files.files();
     const index = list.findIndex((f) => f.path === path);
@@ -1192,37 +1280,33 @@ export function ThumbnailGrid() {
             </Show>
           </Show>
 
-          {/* Masonry Mode —— 同样虚拟化：等高卡片纵向填充，只挂「可见 ± 2 行」 */}
+          {/* Masonry Mode —— 真瀑布流：按图片宽高比排高度，只挂「视口 ± 边距」 */}
           <Show when={mode() === "masonry"}>
             <Show when={masonry()}>
               {(m) => (
                 <div style={{ position: "relative", height: `${m().totalHeight}px` }}>
                   <For each={m().cells}>
-                    {(cell) => {
-                      // 位置读 `m()`，所以列数变化（面板开合 / 拖窗口）时卡片会
-                      // 自动挪到新位置，不需要重建 DOM。
-                      const pos = () => m().place(cell.index);
-                      return (
-                        <div style={{
-                          position: "absolute",
-                          top: `${pos().row * m().rowHeight}px`,
-                          left: `${pos().col * (m().columnWidth + GRID_GAP)}px`,
-                          width: `${m().columnWidth}px`,
-                        }}>
-                          <ThumbnailCard file={cell.file} thumbnailUrl={thumbUrl(cell.file.path)}
-                            placeholderUrl={placeholderUrl(cell.file.path)}
-                            unsupported={isThumbUnsupported(cell.file.path)}
-                            isSelected={files.selectedFiles().has(cell.file.path)} size={size()}
-                            onSelect={(multi) => files.toggleSelect(cell.file.path, multi)}
-                            onRatingChange={(r) => files.updateRating(cell.file.path, r)}
-                            onFavoriteChange={(fav) => files.setFavorite(cell.file.path, fav)}
-                            onOpen={() => { ui.setInfoPanelFile(cell.file.path); ui.setInfoPanelOpen(true); }}
-                            onDoubleClick={() => viewer.open(files.files(), cell.index)}
-                            onImgError={(src) => handleImgError(cell.file.path, src)}
-                            onContextMenu={openFileContextMenu} />
-                        </div>
-                      );
-                    }}
+                    {(cell) => (
+                      <div style={{
+                        position: "absolute",
+                        top: `${cell.y}px`,
+                        left: `${cell.col * (m().columnWidth + GRID_GAP)}px`,
+                        width: `${m().columnWidth}px`,
+                      }}>
+                        <ThumbnailCard file={cell.file} thumbnailUrl={thumbUrl(cell.file.path)}
+                          placeholderUrl={placeholderUrl(cell.file.path)}
+                          unsupported={isThumbUnsupported(cell.file.path)}
+                          isSelected={files.selectedFiles().has(cell.file.path)} size={size()}
+                          imageHeight={cell.imageHeight}
+                          onSelect={(multi) => files.toggleSelect(cell.file.path, multi)}
+                          onRatingChange={(r) => files.updateRating(cell.file.path, r)}
+                          onFavoriteChange={(fav) => files.setFavorite(cell.file.path, fav)}
+                          onOpen={() => { ui.setInfoPanelFile(cell.file.path); ui.setInfoPanelOpen(true); }}
+                          onDoubleClick={() => viewer.open(files.files(), cell.index)}
+                          onImgError={(src) => handleImgError(cell.file.path, src)}
+                          onContextMenu={openFileContextMenu} />
+                      </div>
+                    )}
                   </For>
                 </div>
               )}

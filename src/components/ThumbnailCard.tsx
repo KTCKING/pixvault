@@ -22,6 +22,15 @@ interface Props {
   unsupported?: boolean;
   isSelected: boolean;
   size: number;
+  /**
+   * 图片区高度。不给就等于 `size`（网格 / 列表的等高卡片）。
+   *
+   * 瀑布流按图片真实宽高比算出各自的高度传进来 —— 竖构图就该比横构图高，
+   * 这是它和网格唯一的实质区别。底部文字区固定 40px，**必须**和
+   * `ThumbnailGrid` 里的 `CARD_FOOTER_H` 保持一致，否则布局算出的占位会比
+   * 实际矮一截，底部会累积出空白。
+   */
+  imageHeight?: number;
   onSelect: (multi: boolean) => void;
   onRatingChange: (rating: number) => void;
   /** 收藏 / 取消收藏。 */
@@ -105,17 +114,20 @@ export function ThumbnailCard(props: Props) {
     return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
   };
 
+  /** 图片区高度：瀑布流按宽高比给，网格 / 列表等于 `size`。 */
+  const imgHeight = () => props.imageHeight ?? props.size;
+
   return (
     <div ref={rootRef} class="thumbnail-card" classList={{ selected: props.isSelected }}
       data-path={props.file.path}
-      style={{ height: `${props.size + 40}px` }}
+      style={{ height: `${imgHeight() + 40}px` }}
       onClick={handleClick}
       onContextMenu={(e) => props.onContextMenu?.(e, props.file.path)}
       onDblClick={(e) => { e.preventDefault(); props.onDoubleClick(); }}
       onMouseEnter={() => setShowRating(true)}
       onMouseLeave={() => setShowRating(false)}>
 
-      <div class="relative overflow-hidden" style={{ background: "var(--bg-tertiary)", height: `${props.size}px` }}>
+      <div class="relative overflow-hidden" style={{ background: "var(--bg-tertiary)", height: `${imgHeight()}px` }}>
         {/* 模糊占位图在最底层：真图（下面那个 opacity 0→1 的 img）盖在它上面淡入。 */}
         <Show when={placeholderSrc()}>
           {(src) => (
