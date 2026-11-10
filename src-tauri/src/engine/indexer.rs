@@ -209,6 +209,9 @@ impl Indexer {
             // 文件大小，按尺寸排序时也排不进去。
             "psd" | "psb" => crate::engine::psd::dimensions(path)
                 .and_then(|(w, h)| Some((i32::try_from(w).ok()?, i32::try_from(h).ok()?))),
+            // 视频只认 ISO-BMFF 家族（mp4 / m4v / mov）；mkv、avi 这些容器结构
+            // 完全不同，暂时留空 —— 它们本来也没有缩略图。
+            "mp4" | "m4v" | "mov" => Self::read_mp4_dimensions(path),
             _ => None,
         };
         dims.map(|(w, h)| (Some(w), Some(h))).unwrap_or((None, None))
@@ -305,6 +308,63 @@ impl Indexer {
         Some((w, h.abs()))
     }
 
+    /// 读 mp4 / m4v / mov 的视频显示尺寸。
+    ///
+    /// 尺寸在 `moov → trak → tkhd` 里：末尾两个 16.16 定点数就是宽高。`moov`
+    /// 一般在文件尾部（可能是几十 GB 视频的末尾），所以顶层用 box 长度**跳着
+    /// 走**，跳过 `mdat` 只要一次 seek；找到 `moov` 后只把这一个 box 读进内存
+    /// （上限 [`MOOV_CAP`]），再在里面找 `tkhd`。
+    ///
+    /// 音轨的 `tkhd` 宽高是 0，会被跳过；带旋转矩阵的视频这里返回的是**编码
+    /// 尺寸**（没做矩阵换算），缩略图和「图片尺寸」显示用足够了。
+    fn read_mp4_dimensions(path: &Path) -> Option<(i32, i32)> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut file = std::fs::File::open(path).ok()?;
+        let file_len = file.metadata().ok()?.len();
+        let mut pos = 0u64;
+
+        while pos + 8 <= file_len {
+            file.seek(SeekFrom::Start(pos)).ok()?;
+            let mut hdr = [0u8; 16];
+            file.read_exact(&mut hdr[..8]).ok()?;
+
+            let mut box_len = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as u64;
+            let header_len = match box_len {
+                // 1 = 后面跟 64 位长度
+                1 => {
+                    file.read_exact(&mut hdr[8..16]).ok()?;
+                    box_len = u64::from_be_bytes([
+                        hdr[8], hdr[9], hdr[10], hdr[11],
+                        hdr[12], hdr[13], hdr[14], hdr[15],
+                    ]);
+                    16
+                }
+                // 0 = 一直到文件尾
+                0 => {
+                    box_len = file_len - pos;
+                    8
+                }
+                _ => 8,
+            };
+            if box_len < header_len || pos + box_len > file_len {
+                return None;
+            }
+
+            if &hdr[4..8] == b"moov" {
+                let payload = (box_len - header_len).min(MOOV_CAP) as usize;
+                file.seek(SeekFrom::Start(pos + header_len)).ok()?;
+                let mut buf = vec![0u8; payload];
+                file.read_exact(&mut buf).ok()?;
+                return find_tkhd_dimensions(&buf);
+            }
+
+            pos += box_len;
+        }
+
+        None
+    }
+
     /// Check if a file needs re-indexing (changed since last index)
     pub fn needs_reindex(path: &Path, known_mtime: &str) -> bool {
         if let Ok(metadata) = path.metadata() {
@@ -318,4 +378,48 @@ impl Indexer {
         // If we can't read metadata, assume it needs reindexing
         true
     }
+}
+/// 读进内存的 `moov` box 上限。
+///
+/// 正常视频的 moov 是几百 KB 到几 MB（长片、多音轨会更大些）。设个上限是为了
+/// 避开畸形文件：宁可放弃尺寸，也不要为一个索引项吃掉几十 MB 内存。
+const MOOV_CAP: u64 = 32 * 1024 * 1024;
+
+/// 在 `moov` 内容里找第一段带非零宽高的 `tkhd`。
+///
+/// 直接按 4 字节对齐扫 `tkhd` 标记，而不是完整解析 box 树 —— tkhd 的字段位置
+/// 只跟 version 有关，扫到就能算。音轨的 tkhd 宽高是 0，跳过继续找视频轨。
+fn find_tkhd_dimensions(buf: &[u8]) -> Option<(i32, i32)> {
+    let be_u32_at = |p: usize| -> u32 {
+        u32::from_be_bytes([buf[p], buf[p + 1], buf[p + 2], buf[p + 3]])
+    };
+
+    let mut i = 0usize;
+    while i + 96 <= buf.len() {
+        if &buf[i..i + 4] == b"tkhd" {
+            // box 头是 size(4) + "tkhd"(4)，字段从 payload 起算。
+            let payload = i + 4;
+            let base = match buf[payload] {
+                // v0: version/flags(4) + 时间与轨道 id(16) + 时长(4) + 保留(8)
+                //     + layer/alt/volume/保留(8) + matrix(36) = 76
+                0 => payload + 76,
+                // v1: 两处时间戳各多 4 字节，其余相同
+                1 => payload + 88,
+                _ => {
+                    i += 4;
+                    continue;
+                }
+            };
+            if base + 8 <= buf.len() {
+                // 16.16 定点数，取整数部分。
+                let w = (be_u32_at(base) >> 16) as i32;
+                let h = (be_u32_at(base + 4) >> 16) as i32;
+                if (1..=100_000).contains(&w) && (1..=100_000).contains(&h) {
+                    return Some((w, h));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
