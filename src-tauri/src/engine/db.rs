@@ -490,6 +490,36 @@ impl Database {
         Ok(out)
     }
 
+    /// 列出尺寸缺失（NULL 或 0）的文件路径 —— 供索引后回填使用。
+    ///
+    /// 早期索引只认 jpg/png/gif/webp/bmp 的文件头，PSD 之类的宽高一直是空的；
+    /// 这里把它们捞出来，让上层只读文件头补一次。
+    pub fn list_files_missing_dimensions(&self) -> SqlResult<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path FROM files \
+             WHERE is_deleted = 0 \
+               AND (width IS NULL OR height IS NULL OR width <= 0 OR height <= 0)",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 回写图片尺寸。
+    ///
+    /// 刻意不动 `updated_at`：回填是维护动作，不是用户编辑，不该让这批文件
+    /// 冒到「最近更新」的最前面。
+    pub fn update_file_dimensions(&self, path: &str, width: i32, height: i32) -> SqlResult<()> {
+        self.conn.execute(
+            "UPDATE files SET width = ?1, height = ?2 WHERE path = ?3",
+            params![width, height, path],
+        )?;
+        Ok(())
+    }
+
     pub fn update_file_rating(&self, path: &str, rating: i32) -> SqlResult<()> {
         self.conn.execute(
             "UPDATE files SET rating = ?1, updated_at = datetime('now') WHERE path = ?2",

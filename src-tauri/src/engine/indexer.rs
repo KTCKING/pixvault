@@ -204,9 +204,20 @@ impl Indexer {
             "gif" => Self::read_gif_dimensions(path),
             "webp" => Self::read_webp_dimensions(path),
             "bmp" => Self::read_bmp_dimensions(path),
+            // PSD / PSB 的尺寸在固定偏移的 26 字节头里，读一下就有 —— 以前没接
+            // 这两条，导致库里所有 PSD 的 width/height 都是 NULL，卡片只能显示
+            // 文件大小，按尺寸排序时也排不进去。
+            "psd" | "psb" => crate::engine::psd::dimensions(path)
+                .and_then(|(w, h)| Some((i32::try_from(w).ok()?, i32::try_from(h).ok()?))),
             _ => None,
         };
         dims.map(|(w, h)| (Some(w), Some(h))).unwrap_or((None, None))
+    }
+
+    /// 单独探一次尺寸（索引之外的回填用：只读文件头，不碰图像数据）。
+    pub fn probe_dimensions(path: &Path) -> Option<(i32, i32)> {
+        let (w, h) = Self::get_image_dimensions(path);
+        Some((w?, h?))
     }
 
     fn read_jpeg_dimensions(path: &Path) -> Option<(i32, i32)> {
@@ -271,6 +282,13 @@ impl Indexer {
             b"VP8L" => {
                 let w = (buf[17] as i32 & 0x3F) * 256 + buf[16] as i32 + 1;
                 let h = ((buf[19] as i32 & 0x0F) * 4096 + buf[18] as i32 * 16 + ((buf[17] as i32 >> 6) & 0x03)) + 1;
+                Some((w, h))
+            }
+            // VP8X（扩展格式：动图 / 带 alpha / 带 ICC 的 webp）。画布尺寸是
+            // 24..27 与 27..30 两个 24 位小端值，存的是「尺寸 - 1」。
+            b"VP8X" => {
+                let w = (buf[24] as i32 | (buf[25] as i32) << 8 | (buf[26] as i32) << 16) + 1;
+                let h = (buf[27] as i32 | (buf[28] as i32) << 8 | (buf[29] as i32) << 16) + 1;
                 Some((w, h))
             }
             _ => None,

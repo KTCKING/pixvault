@@ -36,6 +36,14 @@ pub async fn open_library(
     let lib = engine.get_library(&id).ok_or("打开后未找到图库")?;
     let lib = lib.lock().unwrap();
 
+    // 尺寸回填也跟着「打开图库」走：启动恢复图库时不会跑索引，所以只挂在
+    // index_library 上的话，老库要等用户手动重建索引才补得上。这里补一次，
+    // 已补过的行不会再出现在待办里，重复打开零成本。
+    let filled = backfill_missing_dimensions(&lib);
+    if filled > 0 {
+        tracing::info!("尺寸回填：补上 {filled} 个文件的宽高");
+    }
+
     let file_count = lib.db.count_files(&crate::engine::db::FileFilter::default()).unwrap_or(0);
     let cache_size = lib.thumbnail.cache_size();
 
@@ -318,6 +326,29 @@ pub async fn reorder_libraries(
     Ok(())
 }
 
+/// 回填数据库里缺失的图片宽高。
+///
+/// 只读文件头（每个文件几十字节），不解码图像 —— 几千个文件也就几十毫秒，
+/// 所以放在索引之后无条件跑一遍：索引器补上新格式（比如 PSD）的解析后，用户
+/// 下次启动就能看到尺寸，不需要手动重建索引。读不出尺寸的（mp4、RAW）会被
+/// 跳过，不会反复失败重试。
+fn backfill_missing_dimensions(lib: &crate::engine::Library) -> usize {
+    let rows = match lib.db.list_files_missing_dimensions() {
+        Ok(rows) => rows,
+        Err(_) => return 0,
+    };
+    let mut fixed = 0usize;
+    for path in rows {
+        let p = std::path::Path::new(&path);
+        if let Some((w, h)) = crate::engine::indexer::Indexer::probe_dimensions(p) {
+            if lib.db.update_file_dimensions(&path, w, h).is_ok() {
+                fixed += 1;
+            }
+        }
+    }
+    fixed
+}
+
 #[tauri::command]
 pub async fn index_library(
     app_handle: tauri::AppHandle,
@@ -367,6 +398,15 @@ pub async fn index_library(
             conn.execute("ROLLBACK", []).map_err(|e| e.to_string())?;
             return Err(result.unwrap_err());
         }
+    }
+
+    // 尺寸回填：只补仍为空的行，读文件头，不改 updated_at。
+    let filled = {
+        let lib = lib.lock().unwrap();
+        backfill_missing_dimensions(&lib)
+    };
+    if filled > 0 {
+        tracing::info!("尺寸回填：补上 {filled} 个文件的宽高");
     }
 
     // 真实文件数（供侧边栏 / libraries.json 使用）。索引写入的数据以前从不回
@@ -530,8 +570,15 @@ pub async fn restore_libraries(
             if count == 0 {
                 need_reindex.push(id);
             } else {
-                // 数据库里已经有东西了 —— 顺手把缺的缩略图排进后台队列。
+                // 数据库里已经有东西了 —— 顺手把缺的缩略图排进后台队列，
+                // 并把早期索引漏掉的宽高（PSD、扩展格式的 webp）补上。
+                // 启动恢复走的是本函数，不经过 index_library，所以回填必须
+                // 也挂在这里，否则老库永远等不到补尺寸。
                 let lib = lib.lock().unwrap();
+                let filled = backfill_missing_dimensions(&lib);
+                if filled > 0 {
+                    tracing::info!("尺寸回填：补上 {filled} 个文件的宽高");
+                }
                 crate::commands::files::enqueue_missing_thumbnails(&state.thumbs, &lib, &id, false);
             }
         }

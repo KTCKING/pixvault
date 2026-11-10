@@ -112,6 +112,28 @@ fn skip_section<R: Read + Seek>(r: &mut R, what: &str) -> Result<u64, String> {
     Ok(len)
 }
 
+// ── 尺寸探测（索引用）──────────────────────────────
+
+/// 只读 26 字节文件头拿画布尺寸。
+///
+/// 索引阶段要对每个文件取尺寸，但不能碰图像数据（PSD 动辄几十上百 MB）。
+/// 尺寸在固定偏移上：14..18 是高度、18..22 是宽度，都是大端 u32。
+/// PSB（大文档格式，版本 2）的头部布局相同，一样能读。
+pub fn dimensions(path: &Path) -> Option<(u32, u32)> {
+    let mut f = File::open(path).ok()?;
+    let mut buf = [0u8; 26];
+    f.read_exact(&mut buf).ok()?;
+    if &buf[0..4] != b"8BPS" {
+        return None;
+    }
+    let height = be_u32_at(&buf, 14);
+    let width = be_u32_at(&buf, 18);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((width, height))
+}
+
 // ── 内嵌缩略图（快路径）──────────────────────────────
 
 /// 取出 PSD 内嵌的预览图（JPEG 字节）。
