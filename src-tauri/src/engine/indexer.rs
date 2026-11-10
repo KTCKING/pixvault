@@ -237,8 +237,14 @@ impl Indexer {
                 || (0xC9..=0xCB).contains(&buf[1]) || (0xCD..=0xCF).contains(&buf[1]) {
                 let mut sof = [0u8; 7];
                 file.read_exact(&mut sof).ok()?;
-                let h = sof[1] as i32 * 256 + sof[2] as i32;
-                let w = sof[3] as i32 * 256 + sof[4] as i32;
+                // SOF 段的字节排布是 `Length(2) Precision(1) Height(2) Width(2)`。
+                // 这里原来整体错了一位：`h` 取的是「段长低字节 + 精度」，而常见
+                // JPEG 的 SOF 段长就是 0x0011、精度恒为 8，于是**每一张 JPEG 的
+                // height 都被写成 4360**；`w` 取到的其实是 height。后果是全库
+                // JPEG 的宽高全错（实测 2747 张），瀑布流按错的比例排版，横图被
+                // 裁成竖条。
+                let h = sof[3] as i32 * 256 + sof[4] as i32;
+                let w = sof[5] as i32 * 256 + sof[6] as i32;
                 return Some((w, h));
             }
             let mut len_buf = [0u8; 2];

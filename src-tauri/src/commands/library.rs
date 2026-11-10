@@ -39,6 +39,13 @@ pub async fn open_library(
     // 尺寸回填也跟着「打开图库」走：启动恢复图库时不会跑索引，所以只挂在
     // index_library 上的话，老库要等用户手动重建索引才补得上。这里补一次，
     // 已补过的行不会再出现在待办里，重复打开零成本。
+    // 先修历史坏数据（旧版 JPEG SOF 偏移 bug 写坏的宽高），再补空缺 —— 顺序
+    // 不能反：坏行不算「缺失」，backfill 不会碰它们。
+    let repaired = repair_jpeg_dimensions(&lib);
+    if repaired > 0 {
+        tracing::info!("尺寸修复：重写 {repaired} 个 JPEG 的宽高");
+    }
+
     let filled = backfill_missing_dimensions(&lib);
     if filled > 0 {
         tracing::info!("尺寸回填：补上 {filled} 个文件的宽高");
@@ -349,6 +356,44 @@ fn backfill_missing_dimensions(lib: &crate::engine::Library) -> usize {
     fixed
 }
 
+/// 修掉历史版本写坏的 JPEG 尺寸（一次性）。
+///
+/// 旧版 `read_jpeg_dimensions` 解析 SOF 段时整体错了一位：`height` 取的是
+/// 「段长低字节 + 精度」（常见 JPEG 恒为 4360），`width` 取到的其实是 height。
+/// 结果是全库 JPEG 的宽高都是错的 —— 瀑布流按错比例排高度，横图被 cover 裁成
+/// 竖条，信息面板显示的尺寸也不对。
+///
+/// 这里把所有 JPEG 重探一遍覆盖回去。用 `library_meta.dims_revision` 做闸门：
+/// 已经是当前版本就直接返回，所以正常启动不会每次去 open 几千个文件。
+fn repair_jpeg_dimensions(lib: &crate::engine::Library) -> usize {
+    /// 1 = 带 SOF 偏移 bug 的旧数据；2 = 修好之后的口径。
+    const REV: &str = "2";
+    if lib.db.get_meta("dims_revision").as_deref() == Some(REV) {
+        return 0;
+    }
+
+    let paths = match lib.db.list_jpeg_paths() {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    let mut fixed = 0usize;
+    // 两千多条 UPDATE 逐条自动提交会慢一个数量级，包一个事务。
+    let _ = lib.db.conn().execute("BEGIN TRANSACTION", []);
+    for path in &paths {
+        let p = std::path::Path::new(path);
+        if let Some((w, h)) = crate::engine::indexer::Indexer::probe_dimensions(p) {
+            if lib.db.update_file_dimensions(path, w, h).is_ok() {
+                fixed += 1;
+            }
+        }
+    }
+    let _ = lib.db.conn().execute("COMMIT", []);
+
+    // 探测全失败也记版本：否则每次启动都要白跑一遍。
+    let _ = lib.db.set_meta("dims_revision", REV);
+    fixed
+}
+
 #[tauri::command]
 pub async fn index_library(
     app_handle: tauri::AppHandle,
@@ -403,6 +448,10 @@ pub async fn index_library(
     // 尺寸回填：只补仍为空的行，读文件头，不改 updated_at。
     let filled = {
         let lib = lib.lock().unwrap();
+        let repaired = repair_jpeg_dimensions(&lib);
+        if repaired > 0 {
+            tracing::info!("尺寸修复：重写 {repaired} 个 JPEG 的宽高");
+        }
         backfill_missing_dimensions(&lib)
     };
     if filled > 0 {
@@ -575,6 +624,10 @@ pub async fn restore_libraries(
                 // 启动恢复走的是本函数，不经过 index_library，所以回填必须
                 // 也挂在这里，否则老库永远等不到补尺寸。
                 let lib = lib.lock().unwrap();
+                let repaired = repair_jpeg_dimensions(&lib);
+                if repaired > 0 {
+                    tracing::info!("尺寸修复：重写 {repaired} 个 JPEG 的宽高");
+                }
                 let filled = backfill_missing_dimensions(&lib);
                 if filled > 0 {
                     tracing::info!("尺寸回填：补上 {filled} 个文件的宽高");

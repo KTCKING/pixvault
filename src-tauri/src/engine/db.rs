@@ -508,6 +508,44 @@ impl Database {
         Ok(out)
     }
 
+    /// 列出所有 JPEG 的路径（一次性修尺寸用，见 `repair_jpeg_dimensions`）。
+    ///
+    /// 只取 jpg/jpeg：历史上的 SOF 偏移 bug 只影响这一条分支，PNG / GIF / WebP /
+    /// BMP 的解析是对的，没必要把它们的文件头再读一遍。
+    pub fn list_jpeg_paths(&self) -> SqlResult<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path FROM files \
+             WHERE is_deleted = 0 AND LOWER(extension) IN ('jpg', 'jpeg')",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 读 `library_meta` 里的一条记录（不存在返回 `None`）。
+    pub fn get_meta(&self, key: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT value FROM library_meta WHERE key = ?1",
+                params![key],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+    }
+
+    /// 写 `library_meta`（存在则覆盖）。
+    pub fn set_meta(&self, key: &str, value: &str) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT INTO library_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
     /// 回写图片尺寸。
     ///
     /// 刻意不动 `updated_at`：回填是维护动作，不是用户编辑，不该让这批文件

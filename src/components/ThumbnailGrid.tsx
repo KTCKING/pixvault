@@ -441,8 +441,11 @@ export function ThumbnailGrid() {
     if (total === 0 || v.width <= 0 || v.height <= 0) return null;
 
     const inner = Math.max(card, v.width - CONTAINER_PAD * 2);
+    // `round` 而不是 `floor`：Pixcall 用 floor 是因为它的参数叫 `minItemSize`
+    // （保证每张不小于该值），我们的滑块叫「缩略图大小」，语义是目标宽度。
+    // 用 floor 的话 220 会排出 267 的实际宽度，列数少一列，看着像 bug。
     const columns =
-      m === "list" ? 1 : Math.max(1, Math.floor((inner + GRID_GAP) / (card + GRID_GAP)));
+      m === "list" ? 1 : Math.max(1, Math.round((inner + GRID_GAP) / (card + GRID_GAP)));
     const rowH = m === "list" ? LIST_ROW_H : card + 40 + GRID_GAP;
     const rows = Math.ceil(total / columns);
 
@@ -509,9 +512,10 @@ export function ThumbnailGrid() {
     if (total === 0 || width <= 0) return null;
 
     const inner = Math.max(card, width - CONTAINER_PAD * 2);
-    // 和网格用同一个 `floor` 口径（也同 Pixcall：`floor(容器宽 / (最小项宽 + 间距))`）。
-    // 之前这里是 `round`，切模式时列数会差一列、卡片宽度随之跳一下。
-    const columns = Math.max(1, Math.floor((inner + GRID_GAP) / (card + GRID_GAP)));
+    // 列数用 `round`，与网格同一个口径（见下面 `masonryBoard` 里的说明）。
+    // 曾经改成 `floor` 去对齐 Pixcall，结果 220 的缩略图尺寸排出来 267 宽、列数
+    // 从 5 掉到 4 —— 那是把「最小项宽」的取整方式套到了「目标宽度」上。
+    const columns = Math.max(1, Math.round((inner + GRID_GAP) / (card + GRID_GAP)));
     const columnWidth = Math.max(1, (inner - GRID_GAP * (columns - 1)) / columns);
 
     const cache = boardCache;
