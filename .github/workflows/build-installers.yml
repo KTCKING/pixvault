@@ -35,11 +35,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple Silicon（M 系列）
+          # Apple Silicon（M 系列）。macos-14 镜像已下线，用 macos-15；
+          # 它同时有 arm64 与 x86_64 两个变体，所以 Intel 那行必须显式写 -intel。
           - arch: aarch64
             target: aarch64-apple-darwin
-            runner: macos-14
-          # Intel（macos-13 已于 2025-12 退役，改用官方最后的 x86_64 镜像）
+            runner: macos-15
+          # Intel（macos-13 已于 2025-12 退役、macos-14 随后下线，改用 15 的 x86_64 镜像）
           - arch: x86_64
             target: x86_64-apple-darwin
             runner: macos-15-intel
