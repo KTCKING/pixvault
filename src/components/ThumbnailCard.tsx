@@ -1,4 +1,4 @@
-import { createSignal, createEffect, Show, onMount, onCleanup } from "solid-js";
+import { createSignal, createEffect, Show } from "solid-js";
 import type { FileInfo } from "@/lib/tauri-api";
 import { COLOR_LABELS } from "@/lib/tauri-api";
 import { toDisplaySrc, isVideoPath } from "@/lib/thumbs";
@@ -27,8 +27,6 @@ interface Props {
   /** 收藏 / 取消收藏。 */
   onFavoriteChange: (favorite: boolean) => void;
   onOpen: () => void;
-  /** 进出视口时通知父组件（父组件据此维护「当前视口窗口」）。 */
-  onVisibleChange?: (inView: boolean) => void;
   onDoubleClick: () => void;
   /** 图片加载失败时的兜底（父组件会换 data URL）。返回 true 表示已换新地址。 */
   onImgError?: (src: string) => Promise<boolean>;
@@ -75,28 +73,6 @@ export function ThumbnailCard(props: Props) {
     setImgError(false);
     setImgLoaded(false);
     setFallbackTried(false);
-  });
-
-  onMount(() => {
-    // 父组件自己按渲染范围算窗口时（网格 / 列表模式的虚拟化）不会传这个回调，
-    // 那就完全不需要观察器 —— 2400 个 IntersectionObserver 的开销不小。
-    if (!props.onVisibleChange) return;
-
-    // 只观察、不请求：进出视口的信号交给父组件，由它攒够一屏后**批量**提交
-    // （并告诉后端这就是当前视口窗口）。以前每张卡片各自 invoke 一次，快速
-    // 下滑时几百个请求同时抢后端那把引擎锁，越滑越慢。
-    if (typeof IntersectionObserver === "undefined") {
-      props.onVisibleChange(true);
-      return;
-    }
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) props.onVisibleChange?.(e.isIntersecting);
-      },
-      { rootMargin: "400px" },
-    );
-    io.observe(rootRef);
-    onCleanup(() => io.disconnect());
   });
 
   /**

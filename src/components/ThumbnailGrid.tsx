@@ -225,13 +225,6 @@ export function ThumbnailGrid() {
     endCardDrag();
   };
 
-  /** 卡片进出视口 → 维护窗口，并安排一次去抖提交。 */
-  const onCardVisibility = (path: string, inView: boolean) => {
-    if (inView) visiblePaths.add(path);
-    else visiblePaths.delete(path);
-    scheduleFlush();
-  };
-
   /**
    * 安排一次窗口提交。
    *
@@ -351,6 +344,32 @@ export function ThumbnailGrid() {
     template: string;
   }
 
+  /**
+   * 瀑布流里的一张卡片。
+   *
+   * 刻意**只放稳定的字段**（`file` 引用 + 全局下标），列号和行号由
+   * `MasonryLayout.place()` 现算 —— 见下面 `masonry()` 里关于 `For` 复用的说明。
+   */
+  interface MasonryCell {
+    file: FileInfo;
+    /** 全局下标 —— 双击进查看器要用它，切片下标是错的。 */
+    index: number;
+  }
+
+  interface MasonryLayout {
+    /** 本次要渲染的卡片（仅可见 ± 2 行，按列分组）。 */
+    cells: MasonryCell[];
+    /** 整个列表撑起的滚动高度 = 行数 × 行高。 */
+    totalHeight: number;
+    columns: number;
+    /** 单列宽度（px），渲染时用来算 left。 */
+    columnWidth: number;
+    /** 行高 = 卡片高度（`size + 40`）+ 间距。 */
+    rowHeight: number;
+    /** 全局下标 → 该卡片落在第几列第几行。 */
+    place: (index: number) => { col: number; row: number };
+  }
+
   /** 把容器的滚动位置与尺寸同步进信号（同一帧内的多次调用合并成一次）。 */
   let viewportRaf = 0;
   const syncViewport = () => {
@@ -373,7 +392,8 @@ export function ThumbnailGrid() {
 
   const virtual = createMemo<VirtualLayout | null>(() => {
     const m = ui.viewMode();
-    if (m === "masonry") return null; // 瀑布流列高不均，不做虚拟化
+    // 瀑布流的切片维度不一样（按列填充、每列条目数不等），走下面的 `masonry()`。
+    if (m === "masonry") return null;
 
     const list = files.files();
     const total = list.length;
@@ -403,6 +423,96 @@ export function ThumbnailGrid() {
   });
 
   /**
+   * 瀑布流的虚拟化布局。
+   *
+   * 以前这里是一句 `<For each={files.files()}>` + CSS `columns`：几千张图就是
+   * 几千个卡片 DOM、几千个 IntersectionObserver，在软件渲染的机器上切到这个
+   * 模式立刻卡住，而且窗口集合只能靠观察器回调慢慢收敛（越滑越卡、越滑越慢）。
+   *
+   * 之前的注释说「瀑布流列高不均算不出行位置」，其实是个误判：卡片高度是
+   * **固定**的（`ThumbnailCard` 根节点写死 `size + 40`，图片区 `object-cover`
+   * 裁切），所以每一行的高度完全一样，和网格没有区别 —— 唯一的差异是填充方向：
+   * 网格横向填（一行一行），瀑布流纵向填（先填满第一列）。
+   *
+   * 因此切片逻辑可以直接沿用网格那套「按行区间取」，只是把「行 → 连续下标」
+   * 换成「列 × 行 → 该列起点 + 行号」。而 CSS `columns` 默认 `column-fill:
+   * balance` 会把条目**均分**给各列（前 `total % columns` 列各多一张），所以
+   * 每列的起点不是 `col * rows`，必须按均分后的边界累加，否则切换前后顺序会乱。
+   *
+   * 列数也改成按**容器**宽度算。原来用 `window.innerWidth`，信息面板一开
+   * 网格变窄而列数不变，卡片就会横向溢出。
+   *
+   * 为什么 `cells` 里只放 `{ file, index }`、位置靠 `place()` 现算：
+   * Solid 的 `<For>` 按**元素引用**做 diff，如果每次滚动都返回一批新建的
+   * `{ file, col, row }` 对象，引用全变 → 整屏卡片被拆掉重建，图片会闪一下。
+   * 只放稳定的 `file` 引用，`For` 就只增删真正进出视口的那些；列 / 行写在
+   * `style` 里的表达式调用 `place()`，它读 `m()`，所以列数变化（面板开合、
+   * 拖窗口）时位置仍会自动更新。
+   */
+  const masonryCellCache = new Map<number, MasonryCell>();
+
+  const masonry = createMemo<MasonryLayout | null>(() => {
+    if (ui.viewMode() !== "masonry") return null;
+
+    const list = files.files();
+    const total = list.length;
+    const v = viewport();
+    const card = ui.thumbnailSize();
+    if (total === 0 || v.width <= 0 || v.height <= 0) return null;
+
+    const inner = Math.max(card, v.width - CONTAINER_PAD * 2);
+    const columns = Math.max(1, Math.floor((inner + GRID_GAP) / (card + GRID_GAP)));
+    const columnWidth = Math.max(1, (inner - GRID_GAP * (columns - 1)) / columns);
+    const rowHeight = card + 40 + GRID_GAP;
+    const rows = Math.ceil(total / columns);
+
+    // `column-fill: balance` 的均分边界：前 rem 列各多一张。
+    const base = Math.floor(total / columns);
+    const rem = total % columns;
+    const starts: number[] = [];
+    for (let col = 0; col < columns; col++) starts.push(col * base + Math.min(col, rem));
+    const countOf = (col: number) => base + (col < rem ? 1 : 0);
+
+    const place = (index: number) => {
+      let col = 0;
+      for (let c = columns - 1; c >= 0; c--) {
+        if (starts[c] <= index) { col = c; break; }
+      }
+      return { col, row: index - starts[col] };
+    };
+
+    const firstRow = Math.max(0, Math.floor(v.top / rowHeight) - OVERSCAN_ROWS);
+    const lastRow = Math.min(rows, Math.ceil((v.top + v.height) / rowHeight) + OVERSCAN_ROWS);
+
+    const cells: MasonryCell[] = [];
+    for (let col = 0; col < columns; col++) {
+      const start = starts[col];
+      const count = countOf(col);
+      for (let row = firstRow; row < lastRow && row < count; row++) {
+        const index = start + row;
+        const file = list[index];
+        if (!file) continue;
+        // 同一 index 但文件换了（排序 / 过滤后列表整体变化）就丢掉旧对象。
+        let cell = masonryCellCache.get(index);
+        if (!cell || cell.file !== file) {
+          cell = { file, index };
+          masonryCellCache.set(index, cell);
+        }
+        cells.push(cell);
+      }
+    }
+
+    return {
+      cells,
+      totalHeight: Math.max(0, rows * rowHeight),
+      columns,
+      columnWidth,
+      rowHeight,
+      place,
+    };
+  });
+
+  /**
    * 视口窗口 = 当前渲染范围。
    *
    * 范围变化（滚动跨过一行）就重算窗口并安排一次去抖提交 —— 去抖本身保证了
@@ -411,10 +521,15 @@ export function ThumbnailGrid() {
    * 它同时承担「切视图模式时清空旧窗口」的职责：切模式会让整批卡片卸载，旧
    * 路径若不清掉就会一直挂在窗口定义里，把真正可见的那批挤出去。两件事写在
    * 同一个 effect 里，是为了避免两个 effect 争抢 `visiblePaths` 的执行顺序问题。
+   *
+   * 瀑布流现在也走这条路（`masonry()` 的 cells）—— 以前它靠每张卡片自己的
+   * IntersectionObserver 反向汇总，滑得越快漏报越多，窗口迟迟收敛不到位。
    */
-  createEffect(on([ui.viewMode, virtual], ([m, v]) => {
+  createEffect(on([ui.viewMode, virtual, masonry], ([m, v, ms]) => {
     visiblePaths.clear();
-    if (m !== "masonry" && v) {
+    if (m === "masonry") {
+      for (const cell of ms?.cells ?? []) visiblePaths.add(cell.file.path);
+    } else if (v) {
       const list = files.files();
       for (let i = v.start; i < v.start + v.slice.length; i++) {
         const p = list[i]?.path;
@@ -1077,31 +1192,41 @@ export function ThumbnailGrid() {
             </Show>
           </Show>
 
-          {/* Masonry Mode (CSS columns) */}
+          {/* Masonry Mode —— 同样虚拟化：等高卡片纵向填充，只挂「可见 ± 2 行」 */}
           <Show when={mode() === "masonry"}>
-            <div style={{
-              "column-count": Math.max(2, Math.floor(window.innerWidth / (size() + 16))),
-              "column-gap": "8px",
-            }}>
-              <For each={files.files()}>
-                {(file, index) => (
-                  <div style={{ "break-inside": "avoid", "margin-bottom": "8px" }}>
-                    <ThumbnailCard file={file} thumbnailUrl={thumbUrl(file.path)}
-                      placeholderUrl={placeholderUrl(file.path)}
-                      unsupported={isThumbUnsupported(file.path)}
-                      isSelected={files.selectedFiles().has(file.path)} size={size()}
-                      onSelect={(multi) => files.toggleSelect(file.path, multi)}
-                      onRatingChange={(r) => files.updateRating(file.path, r)}
-                      onFavoriteChange={(fav) => files.setFavorite(file.path, fav)}
-                      onOpen={() => { ui.setInfoPanelFile(file.path); ui.setInfoPanelOpen(true); }}
-                      onDoubleClick={() => viewer.open(files.files(), index())}
-                      onVisibleChange={(inView) => onCardVisibility(file.path, inView)}
-                      onImgError={(src) => handleImgError(file.path, src)}
-                      onContextMenu={openFileContextMenu} />
-                  </div>
-                )}
-              </For>
-            </div>
+            <Show when={masonry()}>
+              {(m) => (
+                <div style={{ position: "relative", height: `${m().totalHeight}px` }}>
+                  <For each={m().cells}>
+                    {(cell) => {
+                      // 位置读 `m()`，所以列数变化（面板开合 / 拖窗口）时卡片会
+                      // 自动挪到新位置，不需要重建 DOM。
+                      const pos = () => m().place(cell.index);
+                      return (
+                        <div style={{
+                          position: "absolute",
+                          top: `${pos().row * m().rowHeight}px`,
+                          left: `${pos().col * (m().columnWidth + GRID_GAP)}px`,
+                          width: `${m().columnWidth}px`,
+                        }}>
+                          <ThumbnailCard file={cell.file} thumbnailUrl={thumbUrl(cell.file.path)}
+                            placeholderUrl={placeholderUrl(cell.file.path)}
+                            unsupported={isThumbUnsupported(cell.file.path)}
+                            isSelected={files.selectedFiles().has(cell.file.path)} size={size()}
+                            onSelect={(multi) => files.toggleSelect(cell.file.path, multi)}
+                            onRatingChange={(r) => files.updateRating(cell.file.path, r)}
+                            onFavoriteChange={(fav) => files.setFavorite(cell.file.path, fav)}
+                            onOpen={() => { ui.setInfoPanelFile(cell.file.path); ui.setInfoPanelOpen(true); }}
+                            onDoubleClick={() => viewer.open(files.files(), cell.index)}
+                            onImgError={(src) => handleImgError(cell.file.path, src)}
+                            onContextMenu={openFileContextMenu} />
+                        </div>
+                      );
+                    }}
+                  </For>
+                </div>
+              )}
+            </Show>
           </Show>
 
           {/* List Mode —— 同样虚拟化：行高固定，按行切片 */}
