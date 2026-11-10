@@ -1,5 +1,6 @@
 pub mod db;
 pub mod indexer;
+pub mod psd;
 pub mod thumbnail;
 pub mod thumbs;
 pub mod watcher;

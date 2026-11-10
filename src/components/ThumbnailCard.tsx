@@ -13,6 +13,13 @@ interface Props {
   thumbnailUrl?: string;
   /** 32px 的模糊占位图（LQIP）。真图就绪前铺在卡片上，避免大片空白。 */
   placeholderUrl?: string;
+  /**
+   * 这个格式**根本没有解码器**（RAW / AI / EPS…）。
+   *
+   * 这种文件等多久都不会有缩略图，所以不能再显示骨架屏（那是在骗用户「快好了」），
+   * 也不能退回原图（WebView 读不动几百 MB 的设计稿）。直接画一个格式图标。
+   */
+  unsupported?: boolean;
   isSelected: boolean;
   size: number;
   onSelect: (multi: boolean) => void;
@@ -57,6 +64,9 @@ export function ThumbnailCard(props: Props) {
 
   /** 视频永远没有缩略图（后端不解码视频），卡片自己画一个播放角标。 */
   const isVideo = () => isVideoPath(props.file.filename || props.file.path);
+
+  /** 没有解码器的格式：画格式图标，不显示骨架屏、也不等图。 */
+  const isUnsupported = () => !!props.unsupported && !imgSrc();
 
   const [imgSrc, setImgSrc] = createSignal<string | null>(null);
 
@@ -147,8 +157,22 @@ export function ThumbnailCard(props: Props) {
               onLoad={() => setImgLoaded(true)} onError={handleImgError} />
           )}
         </Show>
-        <Show when={!imgLoaded() && !imgError() && !placeholderSrc() && !isVideo()}>
+        <Show when={!imgLoaded() && !imgError() && !placeholderSrc() && !isVideo() && !isUnsupported()}>
           <div class="absolute inset-0 skeleton" />
+        </Show>
+        {/* 没有解码器的格式：格式图标 + 后缀，明确告诉用户「这张就是没法预览」 */}
+        <Show when={isUnsupported()}>
+          <div
+            class="absolute inset-0 flex flex-col items-center justify-center gap-1"
+            style={{ background: "var(--bg-tertiary)" }}
+          >
+            <span style={{ color: "var(--text-muted)" }}>
+              <IconImage size={26} />
+            </span>
+            <span class="text-2xs uppercase" style={{ color: "var(--text-muted)" }}>
+              {props.file.extension || "无预览"}
+            </span>
+          </div>
         </Show>
         {/* 视频：不排缩略图任务，用播放角标告诉用户「这张点开能放」 */}
         <Show when={isVideo() && !imgLoaded()}>

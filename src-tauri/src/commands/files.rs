@@ -547,16 +547,45 @@ pub async fn empty_trash_all(
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ThumbnailResult {
     /// `ready` —— path 是缩略图；`fallback` —— 生成不出来，用原图；
+    /// `unsupported` —— 这个格式根本没法预览（RAW / AI / EPS…），前端画格式图标；
     /// `pending` —— 已排进后台队列，稍后通过 `thumb-ready` 事件推送。
     pub status: String,
     pub path: String,
+}
+
+/// 把「已确定的结论」翻译成前端能用的状态。
+///
+/// 生成失败时**不能无脑回退原图**：`<img>` 只认 WebView 支持的格式，把 1.5 GB
+/// 的 PSD / 几百 MB 的 RAW 交给 asset 协议只会把界面读死（图库里这类设计稿
+/// 有上百个、合计 10 GB）。所以只有矢量图走 `fallback`，其余一律 `unsupported`。
+fn resolved_pair(path: &str, thumb: Option<String>) -> (&'static str, String) {
+    match thumb {
+        Some(t) => ("ready", t),
+        None if crate::engine::thumbnail::is_webview_renderable(std::path::Path::new(path)) => {
+            ("fallback", path.to_string())
+        }
+        None => ("unsupported", String::new()),
+    }
+}
+
+/// 还没生成过、但根本不值得排队的格式 —— 直接给结论，连数据库都不用查。
+fn precheck_status(path: &str) -> Option<(&'static str, String)> {
+    let p = std::path::Path::new(path);
+    if crate::engine::thumbnail::is_decodable(p) {
+        return None;
+    }
+    if crate::engine::thumbnail::is_webview_renderable(p) {
+        Some(("fallback", path.to_string()))
+    } else {
+        Some(("unsupported", String::new()))
+    }
 }
 
 /// 批量缩略图查询的单条结果（语义同 [`ThumbnailResult`]，外加占位图）。
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ThumbBatchItem {
     pub path: String,
-    /// `ready` / `fallback` / `pending`，语义同 [`ThumbnailResult`]。
+    /// `ready` / `fallback` / `unsupported` / `pending`，语义同 [`ThumbnailResult`]。
     pub status: String,
     /// `ready` / `fallback` 时的图片地址。
     pub thumb: String,
@@ -606,6 +635,12 @@ pub fn enqueue_missing_thumbnails(
         ) {
             continue;
         }
+        // 同上，而且更重要：RAW / AI / EPS 这类根本没有解码器的格式一律不进队列。
+        // 它们以前会被排进去、每张都失败一次，然后前端拿到 fallback 去加载原图
+        // —— 图库里 100 多个 GB 级的设计稿足以把界面拖死。
+        if !crate::engine::thumbnail::is_decodable(std::path::Path::new(&path)) {
+            continue;
+        }
         let hash = hash
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| crate::utils::hash::blake3_hash_bytes(path.as_bytes()));
@@ -649,10 +684,13 @@ pub async fn get_thumbnail_path(
 
     // 已经出过结果的直接回答，连数据库都不用查。
     if let Some(resolved) = state.thumbs.lookup(&key) {
-        return Ok(match resolved {
-            Some(thumb) => ThumbnailResult { status: "ready".into(), path: thumb },
-            None => ThumbnailResult { status: "fallback".into(), path: file_path },
-        });
+        let (status, path) = resolved_pair(&file_path, resolved);
+        return Ok(ThumbnailResult { status: status.into(), path });
+    }
+
+    // 根本没有解码器的格式：直接给结论，别排进队列白烧线程。
+    if let Some((status, path)) = precheck_status(&file_path) {
+        return Ok(ThumbnailResult { status: status.into(), path });
     }
 
     let job = {
@@ -731,19 +769,23 @@ pub async fn get_thumbnails(
 
             // ① 内存里已有结论的，直接回答，连数据库都不用碰。
             if let Some(resolved) = state.thumbs.lookup(&key) {
-                out.push(match resolved {
-                    Some(thumb) => ThumbBatchItem {
-                        path: file_path.clone(),
-                        status: "ready".into(),
-                        thumb,
-                        placeholder: String::new(),
-                    },
-                    None => ThumbBatchItem {
-                        path: file_path.clone(),
-                        status: "fallback".into(),
-                        thumb: file_path.clone(),
-                        placeholder: String::new(),
-                    },
+                let (status, thumb) = resolved_pair(file_path, resolved);
+                out.push(ThumbBatchItem {
+                    path: file_path.clone(),
+                    status: status.into(),
+                    thumb,
+                    placeholder: String::new(),
+                });
+                continue;
+            }
+
+            // ①′ 没有解码器的格式（RAW / AI / EPS…）当场给结论，不进队列。
+            if let Some((status, thumb)) = precheck_status(file_path) {
+                out.push(ThumbBatchItem {
+                    path: file_path.clone(),
+                    status: status.into(),
+                    thumb,
+                    placeholder: String::new(),
                 });
                 continue;
             }
@@ -827,10 +869,12 @@ pub async fn get_preview_path(
     let key = preview_job_key(&library_id, &file_path);
 
     if let Some(resolved) = state.thumbs.lookup(&key) {
-        return Ok(match resolved {
-            Some(preview) => ThumbnailResult { status: "ready".into(), path: preview },
-            None => ThumbnailResult { status: "fallback".into(), path: file_path },
-        });
+        let (status, path) = resolved_pair(&file_path, resolved);
+        return Ok(ThumbnailResult { status: status.into(), path });
+    }
+
+    if let Some((status, path)) = precheck_status(&file_path) {
+        return Ok(ThumbnailResult { status: status.into(), path });
     }
 
     let job = {

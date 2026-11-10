@@ -26,15 +26,46 @@ use crate::engine::thumbnail::ThumbnailEngine;
 /// 然后在改尺寸时忘掉其中一处。
 pub use crate::engine::thumbnail::GRID_SIZE as THUMB_SIZE;
 
-/// 单个并行批次的任务数。批次太大内存峰值高，太小线程利用率不足。
-const BATCH: usize = 24;
+/// 视口任务（urgent）的批次上限，比 bulk 小得多。
+///
+/// urgent 是用户此刻盯着的一屏。批次越大，一个「新窗口」从入队到出图要等的
+/// 「凑批 + 解码」时间越长；批次小一点，切文件夹后第一张图几百毫秒就能出来，
+/// 剩下的在后续批次里补齐，观感上是「一张张刷出来」而不是「先白屏三秒」。
+const URGENT_BATCH: usize = 12;
+
+/// 整库预热（bulk）一次取多少个任务。
+///
+/// 以前这里是 24。问题在于：**一批解码完才会回头看一眼 urgent 队列**，一批
+/// 24 张（这个库中位数 1180 万像素，还有 3.9 亿像素的）就要好几秒 —— 用户切
+/// 到新文件夹时，那几张图明明排在队首，却得等手上这一整批跑完。
+///
+/// 改成「按解码线程数取」，也就是每个线程只领一张：一张解完立刻重新检查队列，
+/// 视口任务的等待上限就从「一批」降到「一张图的解码时间」。
+fn bulk_chunk(threads: usize) -> usize {
+    threads.clamp(2, 16)
+}
 
 /// 解码并行度上限。
 ///
-/// 一张 4K 图解码后约 36MB，跑满所有核心（16 线程）峰值能到 600MB+，一开库
-/// 就很吓人。限制到 4 个线程后峰值约 150MB，而 2400 张图也只是从 8 秒变成
-/// 十几秒 —— 反正都在后台跑。
-const MAX_PARALLEL: usize = 4;
+/// 以前写死 4，理由是「一张 4K 图解码后约 36MB，跑满 16 线程峰值 600MB+」。
+/// 实测一张 4K 图整条链路（解码 + 缩放到 448 + JPEG 编码 + 落盘）峰值约
+/// 40–60MB，10 线程也就 600MB 上下 —— 对今天的机器（16GB 起步）完全不是问题，
+/// 而写死 4 在 20 核的机器上等于只用 20% 的 CPU：6000 张 PNG 的库要 26 分钟
+/// 才补齐，用户看到的就是「缩略图一直在慢慢出、进度环几乎不动」。
+///
+/// 取 `核心数 - 2`（留两核给界面 / 事件循环）并夹在 2–10 之间：4 核笔记本
+/// 用 2 线程不会把系统拖垮，20 核工作站用 10 线程能把暖库时间砍一半以上。
+const MAX_PARALLEL: usize = 10;
+/// 并行度下限。
+const MIN_PARALLEL: usize = 2;
+
+/// 按机器核数决定解码线程数。
+fn decode_threads() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    cores.saturating_sub(2).clamp(MIN_PARALLEL, MAX_PARALLEL)
+}
 
 /// 进度事件的最小间隔（毫秒），避免刷屏。
 const PROGRESS_INTERVAL_MS: u128 = 300;
@@ -168,6 +199,54 @@ pub enum Priority {
     Bulk,
 }
 
+/// 收工时给各图库的预热记录对账。
+///
+/// 有两种情况会让 `pending` 永远清不空，侧边栏的圆环也就永远停在 99%、看起来
+/// 像「进度卡住」：
+///   1. 这个键其实已经有结论（`results` 里有），但当时没能从 `pending` 里摘掉
+///      —— 比如它是被 `remember()` 直接登记成结果的；
+///   2. 这个键的任务本体已经丢了（既不在 `jobs` 也不在 `results`）。
+///
+/// 收工是唯一的「静默时刻」：队列已空、没有任务在飞，此刻还留在 `pending` 里的
+/// 键一定是上面两种之一，全部结清即可。第 2 种会打一条 warn —— 任务丢了本身是
+/// 个 bug，但把它永远挂在进度环上对用户毫无帮助，先结清再留痕。
+fn reconcile_warm(g: &mut Inner) -> bool {
+    if g.warm.is_empty() {
+        return false;
+    }
+    let resolved: HashSet<String> = g.results.keys().cloned().collect();
+    let inflight: HashSet<String> = g.jobs.keys().cloned().collect();
+
+    let mut changed = false;
+    let mut lost = 0usize;
+    for w in g.warm.values_mut() {
+        if w.pending.is_empty() {
+            continue;
+        }
+        let keys: Vec<String> = w.pending.iter().cloned().collect();
+        for key in keys {
+            if resolved.contains(&key) {
+                w.pending.remove(&key);
+                w.done += 1;
+                changed = true;
+            } else if !inflight.contains(&key) {
+                w.pending.remove(&key);
+                w.done += 1;
+                changed = true;
+                lost += 1;
+            }
+        }
+        if w.done > w.total {
+            w.done = w.total;
+            changed = true;
+        }
+    }
+    if lost > 0 {
+        tracing::warn!("缩略图预热对账：{lost} 个任务既无结果也无任务本体，已按完成结清");
+    }
+    changed
+}
+
 pub struct ThumbWorker {
     inner: Mutex<Inner>,
     app: Mutex<Option<AppHandle>>,
@@ -184,10 +263,7 @@ pub struct ThumbWorker {
 
 impl ThumbWorker {
     pub fn new() -> Self {
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(2)
-            .clamp(1, MAX_PARALLEL);
+        let threads = decode_threads();
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("pixvault-thumb-{i}"))
@@ -240,12 +316,31 @@ impl ThumbWorker {
     }
 
     /// 把「本来就已经存在」的缩略图登记进结果表，省掉后续的数据库查询。
+    ///
+    /// 注意这里也要把该键从各图库的预热 `pending` 里摘掉并计入 done：这个键可能
+    /// 正躺在预热队列里（比如它是在预热排队之后才被别的路径生成的），任务一旦
+    /// 被直接登记成结果就不会再经过 `run()` 的统计，`pending` 永远清不掉 ——
+    /// 侧边栏进度环就会一直停在那里，看起来像「进度卡住了」。
     pub fn remember(&self, key: &str, thumb: String) {
-        if let Ok(mut g) = self.inner.lock() {
-            if !g.results.contains_key(key) {
+        let changed = {
+            let Ok(mut g) = self.inner.lock() else { return };
+            if g.results.contains_key(key) {
+                false
+            } else {
                 g.jobs.remove(key);
                 g.results.insert(key.to_string(), Some(thumb));
+                let mut changed = false;
+                for w in g.warm.values_mut() {
+                    if w.pending.remove(key) {
+                        w.done += 1;
+                        changed = true;
+                    }
+                }
+                changed
             }
+        };
+        if changed {
+            self.emit("thumb-warm", self.all_warm_progress());
         }
     }
 
@@ -490,6 +585,9 @@ impl ThumbWorker {
 
     fn run(self: Arc<Self>) {
         let mut last_emit = std::time::Instant::now();
+        let mut last_diag = std::time::Instant::now();
+        // 整库预热一次取多少 —— 跟着解码线程数走（见 `bulk_chunk`）。
+        let chunk = bulk_chunk(self.pool.current_num_threads());
 
         loop {
             // 1. 取一批任务（urgent 优先）；两个队列都空则收工。
@@ -501,22 +599,30 @@ impl ThumbWorker {
             let interacting = self.is_interacting();
             let (batch, yielded): (Vec<ThumbJob>, bool) = {
                 let Ok(mut g) = self.inner.lock() else { return };
-                let mut batch: Vec<ThumbJob> = Vec::with_capacity(BATCH);
-                while batch.len() < BATCH {
-                    // urgent 用**后进先出**：最近提交的窗口就是用户此刻盯着的那一屏，
-                    // 先解它们。整库补齐（bulk）保持先进先出，按 mtime 顺序推进。
-                    let key = match g.urgent.pop_back() {
-                        Some(key) => Some(key),
-                        // 交互期间不碰 bulk —— 直接结束本批。
-                        None if interacting => None,
-                        None => g.bulk.pop_front(),
-                    };
-                    let key = match key {
-                        Some(key) => key,
-                        None => break,
-                    };
+                let mut batch: Vec<ThumbJob> = Vec::with_capacity(URGENT_BATCH);
+
+                // ① 先把 urgent 取一小批。urgent 用**后进先出**：最近提交的窗口就是
+                //    用户此刻盯着的那一屏，先解它们。
+                while batch.len() < URGENT_BATCH {
+                    let Some(key) = g.urgent.pop_back() else { break };
                     if let Some(job) = g.jobs.get(&key) {
                         batch.push(job.clone());
+                    }
+                }
+
+                // ② 只有当 urgent 已经取空时才补 bulk，**绝不混批**。
+                //
+                //    混批的代价被严重低估过：一个 24 张的批次里只要掺进十几张整库
+                //    预热的大图（这个库中位数 1180 万像素、还有 3.9 亿像素的），
+                //    整批就要等它们解码完才 emit —— 用户切到新文件夹后看到的
+                //    「明明只差这几张，却要等好几秒」。拆开后，视口那一屏永远只
+                //    跟自己的解码时间赛跑。
+                if batch.is_empty() && !interacting {
+                    while batch.len() < chunk {
+                        let Some(key) = g.bulk.pop_front() else { break };
+                        if let Some(job) = g.jobs.get(&key) {
+                            batch.push(job.clone());
+                        }
                     }
                 }
 
@@ -527,14 +633,31 @@ impl ThumbWorker {
                     // 不能走下面「两个队列都空」的收工分支 —— 否则预热会永久停摆，
                     // 只能等下次入队才重新拉起 worker。
                     (Vec::new(), true)
+                } else if !g.jobs.is_empty() {
+                    // 队列空了，但任务表里还有没做完的活 —— 说明上一批任务丢了
+                    // （worker 线程异常退出）。把它们重新排回 bulk 接着做，
+                    // 否则这些卡片会永远停在骨架屏上、预热进度环也永远收不掉。
+                    let orphaned: Vec<String> = g.jobs.keys().cloned().collect();
+                    let n = orphaned.len();
+                    for key in orphaned {
+                        g.bulk.push_back(key);
+                    }
+                    tracing::warn!("缩略图队列跑空但仍有 {n} 个任务没做完，已重新排队");
+                    (Vec::new(), true)
                 } else {
                     // 同一个锁里判断 + 复位，避免和 enqueue 抢跑：要么 enqueue
                     // 已经插了新任务（这里看的队列非空），要么它之后看到
                     // running == false 并重新拉线程。
                     g.running = false;
+                    // 收工前对账（见 reconcile_warm）：把「已有结论」和
+                    // 「彻底失联」的残留清零，否则进度环永远差最后几个百分点。
+                    let warm_changed = reconcile_warm(&mut g);
                     let progress = ThumbProgress { total: g.total, done: g.done, running: false };
                     drop(g);
                     self.emit("thumb-progress", progress);
+                    if warm_changed {
+                        self.emit("thumb-warm", self.all_warm_progress());
+                    }
                     return;
                 }
             };
@@ -593,7 +716,7 @@ impl ThumbWorker {
 
             // 4. 登记结果（同时把任务从 jobs 里摘掉 —— 之后允许重试），并推进
             //    各图库的预热进度。
-            let (progress, warm_changed) = {
+            let (progress, warm_changed, diag) = {
                 let Ok(mut g) = self.inner.lock() else { return };
                 g.done += generated.len() as u64;
                 for (key, _, item) in &generated {
@@ -616,6 +739,15 @@ impl ThumbWorker {
                 (
                     ThumbProgress { total: g.total, done: g.done, running: true },
                     warm_changed,
+                    // 诊断快照：每 10 秒往日志里落一行，用户反馈「进度卡住」
+                    // 时能一眼看出是「队列还很长」还是「任务丢了」。
+                    (
+                        g.done,
+                        g.total,
+                        g.urgent.len(),
+                        g.bulk.len(),
+                        g.warm.values().map(|w| w.pending.len()).sum::<usize>(),
+                    ),
                 )
             };
             if warm_changed {
@@ -641,6 +773,15 @@ impl ThumbWorker {
             if last_emit.elapsed().as_millis() >= PROGRESS_INTERVAL_MS {
                 last_emit = std::time::Instant::now();
                 self.emit("thumb-progress", progress);
+            }
+
+            // 诊断行：10 秒一条。看得出「慢」到底是队列长还是任务丢。
+            if last_diag.elapsed().as_secs() >= 10 {
+                last_diag = std::time::Instant::now();
+                let (done, total, urgent, bulk, warm_pending) = diag;
+                tracing::info!(
+                    "缩略图 {done}/{total}，队列 urgent={urgent} bulk={bulk}，预热待办 {warm_pending}"
+                );
             }
         }
     }

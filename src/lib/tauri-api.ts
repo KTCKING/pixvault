@@ -417,14 +417,15 @@ export interface PaginatedFiles {
  *  - `pending`：已排进后台队列，稍后会收到 `thumb-ready` 事件
  */
 export interface ThumbnailResult {
-  status: "ready" | "fallback" | "pending";
+  /** `unsupported` = 这个格式没有解码器，别等缩略图（前端画格式图标）。 */
+  status: "ready" | "fallback" | "pending" | "unsupported";
   path: string;
 }
 
 /** 批量缩略图查询的单条结果（语义同 ThumbnailResult，外加占位图）。 */
 export interface ThumbBatchItem {
   path: string;
-  status: "ready" | "fallback" | "pending";
+  status: "ready" | "fallback" | "pending" | "unsupported";
   /** ready / fallback 时的图片地址。 */
   thumb: string;
   /** 已缓存的模糊占位图（32px data URL）；没有则为空串。 */

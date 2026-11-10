@@ -72,6 +72,44 @@ const LQIP_QUALITY: u8 = 60;
 /// 一个看不出来的差异不划算。混着用没有副作用，新生成的图自然就是新算法。
 const CACHE_VERSION: &str = "grid448-preview1600-q70-catmull";
 
+/// 取小写扩展名（不含点）。
+fn ext_lower(path: &Path) -> String {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+/// 我们**确实能**解出像素的扩展名。
+///
+/// 只有出现在这里的格式才值得排进缩略图队列。以前没有这份名单，索引里收的
+/// RAW / AI / EPS 也会被排进去，每轮开库都白试一遍解码；而它们失败后前端会
+/// 拿到 `fallback` 去加载原图 —— 一张 1.5 GB 的 PSD 交给 WebView 的后果就是
+/// 整个界面卡死（这类文件在图库里往往有上百个）。
+///
+/// `image` crate 的默认 feature 覆盖了前一组；`psd` 由本项目的
+/// [`crate::engine::psd`] 负责。
+const DECODABLE_EXTS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "ico", "tif", "tiff",
+    "qoi", "tga", "dds", "hdr", "exr", "pnm", "ff", "psd",
+];
+
+/// WebView 自己能渲染、因此可以「回退原图」的扩展名。
+///
+/// 只有矢量图这一种：`image` 解不了 SVG，但 `<img>` 天生认它。其余格式生成
+/// 失败就该老实显示「无法预览」，绝不能把原始文件丢给 WebView 去赌一把。
+const WEBVIEW_RENDERABLE_EXTS: &[&str] = &["svg"];
+
+/// 这个文件能不能出缩略图。
+pub fn is_decodable(path: &Path) -> bool {
+    DECODABLE_EXTS.contains(&ext_lower(path).as_str())
+}
+
+/// 生成不出缩略图时，能不能直接把原图交给 WebView 显示。
+pub fn is_webview_renderable(path: &Path) -> bool {
+    WEBVIEW_RENDERABLE_EXTS.contains(&ext_lower(path).as_str())
+}
+
 #[derive(Clone)]
 pub struct ThumbnailEngine {
     cache_dir: PathBuf,
@@ -134,6 +172,17 @@ impl ThumbnailEngine {
             return Ok(url);
         }
 
+        // PSD 快速通道：资源段里通常内嵌一张 160px 的 JPEG 预览，只读文件头几百
+        // KB 就能拿到。对 1.5 GB 的 PSD 也是毫秒级 —— 而且合成图那条慢路本来就
+        // 要先等解码，模糊底正好用来填这段等待。
+        if ext_lower(source) == "psd" {
+            if let Some(bytes) = crate::engine::psd::embedded_thumbnail(source) {
+                if let Ok(img) = image::load_from_memory(&bytes) {
+                    return self.write_lqip(&img, &dest);
+                }
+            }
+        }
+
         let bytes = Self::read_exif_thumbnail_bytes(source)?;
         let img = image::load_from_memory(&bytes)
             .map_err(|e| format!("内嵌缩略图无法解码: {}", e))?;
@@ -182,6 +231,13 @@ impl ThumbnailEngine {
             return Ok(thumb_path);
         }
 
+        // PSD 走自己的解码器：`image` 不认这个格式，以前它必然失败，然后前端
+        // 退回加载原始文件（GB 级），这就是「PSD 分类一点就卡死」的根源。
+        if ext_lower(source_path) == "psd" {
+            self.generate_psd(source_path, &thumb_path, self.grid_size)?;
+            return Ok(thumb_path);
+        }
+
         // Try EXIF thumbnail first (near-instant for JPEGs)
         if self.try_exif_thumbnail(source_path, &thumb_path).is_ok() {
             return Ok(thumb_path);
@@ -204,8 +260,54 @@ impl ThumbnailEngine {
         if dest.exists() {
             return Ok(dest);
         }
+        if ext_lower(source_path) == "psd" {
+            self.generate_psd(source_path, &dest, self.preview_size)?;
+            return Ok(dest);
+        }
         self.generate_with_image_crate(source_path, &dest, self.preview_size)?;
         Ok(dest)
+    }
+
+    /// PSD 缩略图 / 预览图。
+    ///
+    /// 主路径是 [`crate::engine::psd::render_composite`]：流式解合成图，边解边降
+    /// 采样，内存只占「一行 + 目标小图」，与源文件多大无关。
+    ///
+    /// 解不了的时候（32 位浮点、ZIP 压缩、索引色、文损坏）退回资源段里的内嵌
+    /// 预览：只有 160px，放大会糊，但**有图**远好过给用户一个永远的骨架屏。
+    fn generate_psd(&self, source: &Path, dest: &Path, target_size: u32) -> Result<(), String> {
+        let img = match crate::engine::psd::render_composite(source, target_size) {
+            Ok(rgb) => image::DynamicImage::ImageRgb8(rgb),
+            Err(primary) => {
+                let bytes = crate::engine::psd::embedded_thumbnail(source).ok_or_else(|| {
+                    format!("PSD 合成图解码失败（{primary}），且文件里没有内嵌预览")
+                })?;
+                image::load_from_memory(&bytes)
+                    .map_err(|e| format!("PSD 内嵌预览无法解码（{primary}）: {e}"))?
+            }
+        };
+        self.write_jpeg(&img, dest, target_size)
+    }
+
+    /// 缩到目标尺寸内并编码成 JPEG 落盘。
+    ///
+    /// 只缩不放：源图本来就更小时原样保存（调用方会拿到一张小图，界面放大显示）。
+    fn write_jpeg(&self, img: &image::DynamicImage, dest: &Path, target_size: u32) -> Result<(), String> {
+        let scaled = downscale(img, target_size);
+        let mut buf = Vec::new();
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
+        enc.encode(
+            &scaled.to_rgb8(),
+            scaled.width(),
+            scaled.height(),
+            image::ColorType::Rgb8.into(),
+        )
+        .map_err(|e| format!("JPEG encode: {}", e))?;
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(dest, &buf).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// 从 JPEG 头部取出 EXIF 内嵌缩略图的**原始 JPEG 字节**。
@@ -331,22 +433,22 @@ impl ThumbnailEngine {
 
     /// 整图解码生成缩略图 / 预览图。`target_size` 是长边上限。
     fn generate_with_image_crate(&self, source: &Path, dest: &Path, target_size: u32) -> Result<(), String> {
+        let ext = ext_lower(source);
+        // JPEG 先走「DCT 缩放解码」：直接把 8×8 的 DCT 块解到 1/8 尺寸，而不是
+        // 先解出整张原图再缩小。对长条漫画（这个库里有 48837×4360 的）差别是
+        // 天壤之别 —— 整图解码要 700 MB 内存，1/8 只要 10 MB，内存不再打架。
+        if ext == "jpg" || ext == "jpeg" {
+            if let Ok(img) = decode_jpeg_scaled(source, target_size) {
+                return self.write_jpeg(&img, dest, target_size);
+            }
+        }
+
         let img = image::ImageReader::open(source)
             .map_err(|e| format!("Failed to open: {}", e))?
             .decode()
             .map_err(|e| format!("Failed to decode: {}", e))?;
 
-        let thumb = downscale(&img, target_size);
-
-        let mut jpeg_data = Vec::new();
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_data, JPEG_QUALITY);
-        encoder
-            .encode(&thumb.to_rgb8(), thumb.width(), thumb.height(), image::ColorType::Rgb8.into())
-            .map_err(|e| format!("JPEG encode error: {}", e))?;
-
-        let jpeg_path = dest.with_extension("jpg");
-        fs::write(&jpeg_path, &jpeg_data).map_err(|e| e.to_string())?;
-        Ok(())
+        self.write_jpeg(&img, dest, target_size)
     }
 
     /// 缓存格式升级：参数变了就把上一版的缩略图全部删掉。
@@ -430,6 +532,47 @@ impl ThumbnailEngine {
             .filter(|e| e.file_type().is_file())
             .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
             .sum()
+    }
+}
+
+/// 用 `jpeg-decoder` 按 DCT 比例解码（1/8、1/4、1/2 里挑一档）。
+///
+/// 为什么值得单独引一个依赖：`image` 只能整图解码，而缩略图最终只要 448px。
+/// 一张 48837×4360 的漫画条整图解码是 7.2 亿字节的 RGB 缓冲（≈700 MB），十来个
+/// 线程同时解就是 7 GB —— 机器开始换页，缩略图队列从「每秒八张」掉到「每秒一张」
+/// 都不到。按 1/8 解只要 11 MB，像素运算量还少 64 倍。
+///
+/// 请求尺寸给 `bounds`，解码器会**自动挑**不小于请求尺寸的最大缩放档，所以
+/// 448 / 1600 两种目标都走同一条路径，剩下的零头交给常规重采样。
+fn decode_jpeg_scaled(source: &Path, bounds: u32) -> Result<image::DynamicImage, String> {
+    use jpeg_decoder::PixelFormat;
+
+    let file = fs::File::open(source).map_err(|e| format!("打开 JPEG 失败: {e}"))?;
+    let mut dec = jpeg_decoder::Decoder::new(std::io::BufReader::with_capacity(256 * 1024, file));
+    dec.read_info().map_err(|e| format!("JPEG 头部解析失败: {e}"))?;
+    let info = dec.info().ok_or("JPEG 缺少图像信息")?;
+
+    // JPEG 的宽高上限就是 u16，这里天然不会溢出。
+    let long_edge = (info.width as u32).max(info.height as u32);
+    // 缩小不到一半时缩放档位没得选（只有 1/8、1/4、1/2），交给整图路径更省事。
+    if long_edge >= bounds.saturating_mul(2) {
+        dec.scale(bounds as u16, bounds as u16)
+            .map_err(|e| format!("JPEG 缩放解码失败: {e}"))?;
+    }
+
+    let pixels = dec.decode().map_err(|e| format!("JPEG 解码失败: {e}"))?;
+    let out = dec.info().ok_or("JPEG 缺少输出信息")?;
+    let (w, h) = (out.width as u32, out.height as u32);
+
+    match out.pixel_format {
+        PixelFormat::RGB24 => image::RgbImage::from_raw(w, h, pixels)
+            .map(image::DynamicImage::ImageRgb8)
+            .ok_or_else(|| "JPEG 像素数量与尺寸不符".to_string()),
+        PixelFormat::L8 => image::GrayImage::from_raw(w, h, pixels)
+            .map(image::DynamicImage::ImageLuma8)
+            .ok_or_else(|| "JPEG 像素数量与尺寸不符".to_string()),
+        // 16 位灰度 / CMYK：数量少，退回 image 的常规路径，别为它们写两套转换。
+        other => Err(format!("暂不支持的 JPEG 像素格式 {other:?}")),
     }
 }
 

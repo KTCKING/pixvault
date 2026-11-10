@@ -1,8 +1,20 @@
-import { Show, onMount, onCleanup, createSignal, createEffect } from "solid-js";
+import { Show, onMount, onCleanup, createSignal, createEffect, on } from "solid-js";
 import { useViewerStore } from "@/stores/viewer";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { isVideoPath } from "@/lib/thumbs";
+import { listen } from "@tauri-apps/api/event";
+import { api } from "@/lib/tauri-api";
+import { activeLibraryId } from "@/stores/library";
+import { isVideoPath, thumbUrl, toDisplaySrc } from "@/lib/thumbs";
 import { IconClose } from "@/components/icons";
+
+/**
+ * WebView 自己能渲染的位图 / 矢量格式。
+ *
+ * 不在这个名单里的（PSD、RAW、AI、EPS…）**不能**直接喂原图：一张 1.5 GB 的
+ * PSD 会让 asset 协议把整个文件读一遍再解码失败，界面直接冻住。这类文件改用
+ * 后端生成的 1600px 预览图。
+ */
+const NATIVE_RE = /\.(jpe?g|png|gif|webp|bmp|ico|svg|avif|tiff?|tif)$/i;
 
 export function ImageViewer() {
   const viewer = useViewerStore();
@@ -93,6 +105,55 @@ export function ImageViewer() {
     setVideoError(false);
   });
 
+  /**
+   * 查看器真正要显示的图片地址。
+   *
+   * 原生格式直接用原图（最清晰）；PSD / RAW 这类改用后端生成的 1600px 预览图
+   * —— 它们的「原图」WebView 根本解不了，硬加载只会把界面读死。
+   */
+  const [bigSrc, setBigSrc] = createSignal<string | null>(null);
+  const [previewOnly, setPreviewOnly] = createSignal(false);
+
+  const loadBigSrc = async (path: string) => {
+    if (NATIVE_RE.test(path)) {
+      setPreviewOnly(false);
+      setBigSrc(convertFileSrc(path));
+      return;
+    }
+    setPreviewOnly(true);
+    // 先垫一张已有的缩略图（秒回），再去后台要 1600px 预览。
+    const cached = thumbUrl(path);
+    if (cached) setBigSrc(toDisplaySrc(cached));
+    const libId = activeLibraryId();
+    if (!libId) return;
+    try {
+      const res = await api.getPreviewPath(libId, path);
+      if (file()?.path !== path) return;   // 已经翻到别的图了
+      if (res.status === "ready") setBigSrc(toDisplaySrc(res.path));
+    } catch {
+      /* 预览生成失败就保持缩略图 */
+    }
+  };
+
+  createEffect(on(() => file()?.path, (path) => {
+    setBigSrc(null);
+    if (path) void loadBigSrc(path);
+  }, { defer: true }));
+
+  onMount(() => {
+    // 后台把 1600px 预览生成好后推回来 —— 正好是当前这张就换上。
+    let unlisten: (() => void) | undefined;
+    listen<{ path: string; thumb: string | null }[]>("preview-ready", (event) => {
+      const cur = file()?.path;
+      if (!cur) return;
+      const hit = event.payload?.find((it) => it.path === cur);
+      if (hit?.thumb) setBigSrc(toDisplaySrc(hit.thumb));
+    })
+      .then((fn) => { unlisten = fn; })
+      .catch(() => { /* 忽略 */ });
+    onCleanup(() => unlisten?.());
+  });
+
   const formatSize = (bytes: number) => {
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -150,16 +211,24 @@ export function ImageViewer() {
         <Show
           when={isVideo()}
           fallback={
-            <img
-              src={convertFileSrc(file()?.path || "")}
-              alt={file()?.filename}
-              class="max-w-[95vw] max-h-[95vh] object-contain select-none transition-transform duration-75"
-              draggable={false}
-              style={{
-                transform: `scale(${zoom()}) translate(${pan().x / zoom()}px, ${pan().y / zoom()}px)`,
-              }}
-              onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-            />
+            <Show when={bigSrc()} fallback={
+              <div class="text-sm" style={{ color: "rgba(255,255,255,0.7)" }}>
+                正在生成预览…
+              </div>
+            }>
+              {(src) => (
+                <img
+                  src={src()}
+                  alt={file()?.filename}
+                  class="max-w-[95vw] max-h-[95vh] object-contain select-none transition-transform duration-75"
+                  draggable={false}
+                  style={{
+                    transform: `scale(${zoom()}) translate(${pan().x / zoom()}px, ${pan().y / zoom()}px)`,
+                  }}
+                  onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                />
+              )}
+            </Show>
           }
         >
           <Show
@@ -190,7 +259,9 @@ export function ImageViewer() {
         <div class="absolute bottom-4 left-1/2 -translate-x-1/2 text-xs" style={{ color: "rgba(255,255,255,0.4)" }}>
           {isVideo()
             ? "← → 方向键切换 · 空格播放/暂停 · Esc 关闭"
-            : "← → 方向键切换 · 滚轮缩放 · 拖拽平移 · Esc 关闭"}
+            : previewOnly()
+              ? "预览图（原始文件无法直接解码）· ← → 方向键切换 · Esc 关闭"
+              : "← → 方向键切换 · 滚轮缩放 · 拖拽平移 · Esc 关闭"}
         </div>
       </div>
     </Show>

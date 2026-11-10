@@ -19,6 +19,7 @@ import {
 } from "@/components/icons";
 import {
   thumbUrl, setThumbUrl, placeholderUrl, setPlaceholderUrl, clearThumbUrls, toDisplaySrc, isVideoPath,
+  isThumbUnsupported, setThumbUnsupported,
 } from "@/lib/thumbs";
 import { activeLibraryId } from "@/stores/library";
 import { listen } from "@tauri-apps/api/event";
@@ -313,6 +314,9 @@ export function ThumbnailGrid() {
           if (it.placeholder) setPlaceholderUrl(it.path, it.placeholder);
           if (it.status === "ready") setThumbUrl(it.path, it.thumb);
           else if (it.status === "fallback") setThumbUrl(it.path, it.path);
+          // 没有解码器的格式（RAW / AI / EPS…）：记下来，卡片画格式图标。
+          // **绝不能**退回原图 —— 那会把几百 MB 的文件丢给 WebView。
+          else if (it.status === "unsupported") setThumbUnsupported(it.path);
           // pending：什么都不做，等后台的 thumb-placeholder / thumb-ready 推回来。
         }
       } catch (err) {
@@ -528,6 +532,7 @@ export function ThumbnailGrid() {
             if (it.placeholder) setPlaceholderUrl(it.path, it.placeholder);
             if (it.status === "ready") setThumbUrl(it.path, it.thumb);
             else if (it.status === "fallback") setThumbUrl(it.path, it.path);
+            else if (it.status === "unsupported") setThumbUnsupported(it.path);
           }
         } catch (err) {
           void api.diagLog("resync", `ERROR ${String(err)}`);
@@ -579,7 +584,10 @@ export function ThumbnailGrid() {
       const payload = event.payload;
       if (!payload?.length) return;
       for (const item of payload) {
-        setThumbUrl(item.path, item.thumb ?? item.path);
+        // thumb 为 null 表示后台**确定**生成不出来（损坏文件 / 解不了的编码）。
+        // 以前这里回退原图，等于把几百 MB 的文件丢给 WebView —— 现在只标记状态。
+        if (item.thumb) setThumbUrl(item.path, item.thumb);
+        else setThumbUnsupported(item.path);
       }
     })
       .then((fn) => { unlisten = fn; })
@@ -602,7 +610,12 @@ export function ThumbnailGrid() {
     // 查询会立刻从内存返回 ready / fallback，不会再解一次码。
     listen<ThumbProgress>("thumb-progress", (event) => {
       if (event.payload?.running) return;
-      const missing = files.files().filter((f) => !thumbUrl(f.path)).map((f) => f.path);
+      // 只重问「还可能有结果」的：视频和 unsupported 的格式永远不会出图，把它们
+      // 算进来会让每轮队列跑空都触发一次没完没了的无效重扫。
+      const missing = files
+        .files()
+        .filter((f) => !thumbUrl(f.path) && !isThumbUnsupported(f.path) && !isVideoPath(f.path))
+        .map((f) => f.path);
       if (missing.length === 0) return;
       void resyncMissing(missing);
     })
@@ -1047,6 +1060,7 @@ export function ThumbnailGrid() {
                       {(file, index) => (
                         <ThumbnailCard file={file} thumbnailUrl={thumbUrl(file.path)}
                           placeholderUrl={placeholderUrl(file.path)}
+                          unsupported={isThumbUnsupported(file.path)}
                           isSelected={files.selectedFiles().has(file.path)} size={size()}
                           onSelect={(multi) => files.toggleSelect(file.path, multi)}
                           onRatingChange={(r) => files.updateRating(file.path, r)}
@@ -1074,6 +1088,7 @@ export function ThumbnailGrid() {
                   <div style={{ "break-inside": "avoid", "margin-bottom": "8px" }}>
                     <ThumbnailCard file={file} thumbnailUrl={thumbUrl(file.path)}
                       placeholderUrl={placeholderUrl(file.path)}
+                      unsupported={isThumbUnsupported(file.path)}
                       isSelected={files.selectedFiles().has(file.path)} size={size()}
                       onSelect={(multi) => files.toggleSelect(file.path, multi)}
                       onRatingChange={(r) => files.updateRating(file.path, r)}
@@ -1121,8 +1136,14 @@ export function ThumbnailGrid() {
                               )}
                             </Show>
                             <Show when={thumbUrl(file.path)} fallback={
-                              <Show when={!placeholderUrl(file.path)}>
-                                <div class="w-full h-full skeleton" />
+                              <Show when={isThumbUnsupported(file.path)} fallback={
+                                <Show when={!placeholderUrl(file.path)}>
+                                  <div class="w-full h-full skeleton" />
+                                </Show>
+                              }>
+                                <div class="w-full h-full flex items-center justify-center" style={{ color: s.muted }}>
+                                  <IconImage size={16} />
+                                </div>
                               </Show>
                             }>
                               {(url) => (

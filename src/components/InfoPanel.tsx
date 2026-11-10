@@ -7,7 +7,7 @@ import { useFilesStore } from "@/stores/files";
 import { useUIStore } from "@/stores/ui";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { thumbUrl, toDisplaySrc } from "@/lib/thumbs";
+import { thumbUrl, toDisplaySrc, isThumbUnsupported, isVideoPath } from "@/lib/thumbs";
 import { IconCheck, IconChevronRight, IconClose, IconFolderOpen, IconHeart, IconImage, IconLink, IconSort, IconStarFilled } from "@/components/icons";
 
 interface Props {
@@ -162,6 +162,9 @@ export function InfoPanel(props: Props) {
     if (full) return toDisplaySrc(full);
     const small = thumbUrl(filePath);
     if (small) return toDisplaySrc(small);
+    // 视频和「没有解码器」的格式**不能**退回原图：那可能是几百 MB 甚至 GB 级
+    // 的设计稿 / 视频，交给 WebView 只会把界面读死。返回空串，界面画格式图标。
+    if (isVideoPath(filePath) || isThumbUnsupported(filePath)) return "";
     return convertFileSrc(filePath);
   };
 
@@ -348,9 +351,20 @@ export function InfoPanel(props: Props) {
             {/* 预览 */}
             <div class="flex items-center justify-center flex-shrink-0"
               style={{ background: s.tertiary, height: "13rem" }}>
-              <img src={previewSrc(path())} alt=""
-                class="max-w-full max-h-full object-contain" draggable={false}
-                onError={handlePreviewError} />
+              <Show when={previewSrc(path())} fallback={
+                <div class="flex flex-col items-center gap-1" style={{ color: s.muted }}>
+                  <IconImage size={26} />
+                  <span class="text-2xs uppercase">
+                    {(path().split(".").pop() || "").toUpperCase()} · 无预览
+                  </span>
+                </div>
+              }>
+                {(src) => (
+                  <img src={src()} alt=""
+                    class="max-w-full max-h-full object-contain" draggable={false}
+                    onError={handlePreviewError} />
+                )}
+              </Show>
             </div>
 
             <Show when={fileInfo()} fallback={

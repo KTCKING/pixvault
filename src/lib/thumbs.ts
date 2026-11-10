@@ -84,12 +84,52 @@ export function setPlaceholderUrl(path: string, url: string | undefined): void {
   ensurePh(path).set(url);
 }
 
+// ── 无法预览的格式 ────────────────────────────────
+//
+// RAW / AI / EPS 这类文件根本没有解码器，缩略图永远生成不出来。以前后端会回
+// `fallback` 让前端退回原图，结果 WebView 去拉一个几百 MB 的设计稿，界面直接
+// 卡死；而卡片又一直等不到图，只能永远显示骨架屏。
+//
+// 现在后端会明确回 `unsupported`，这里单独记一个状态，卡片据此画「格式图标」。
+// 用 per-key 信号的原因和上面完全一样：一张图的状态变化不该让整屏卡片重算。
+
+/** 布尔信号的小包装（`solid-js` 的 Setter 是泛型别名，这里显式收窄）。 */
+type SetterB = (value: boolean) => boolean;
+
+const unsupAccessors = new Map<string, Accessor<boolean>>();
+const unsupSetters = new Map<string, SetterB>();
+
+function ensureUnsup(path: string): { get: Accessor<boolean>; set: SetterB } {
+  let get = unsupAccessors.get(path);
+  let set = unsupSetters.get(path);
+  if (!get || !set) {
+    const [g, s] = createSignal(false);
+    get = g;
+    set = s as SetterB;
+    unsupAccessors.set(path, get);
+    unsupSetters.set(path, set);
+  }
+  return { get, set };
+}
+
+/** 这个文件是不是「根本没有解码器，别等缩略图了」。 */
+export function isThumbUnsupported(path: string): boolean {
+  return ensureUnsup(path).get();
+}
+
+/** 标记某张图无法预览。 */
+export function setThumbUnsupported(path: string): void {
+  ensureUnsup(path).set(true);
+}
+
 /** 切换图库时清空（旧库的卡片会被整体重建，不会读到陈旧值）。 */
 export function clearThumbUrls(): void {
   accessors.clear();
   setters.clear();
   phAccessors.clear();
   phSetters.clear();
+  unsupAccessors.clear();
+  unsupSetters.clear();
 }
 
 /**

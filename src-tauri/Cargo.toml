@@ -8,7 +8,11 @@ rust-version = "1.77"
 
 [lib]
 name = "pixvault_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 桌面端只需要 rlib（bin 静态链接它）。staticlib / cdylib 是 Tauri 模板给
+# iOS / Android 用的；在 Windows GNU 工具链上，debug 版 cdylib 会导出 14 万+
+# 符号，超出 MinGW ld 的 16 位导出序号上限（export ordinal too large），
+# 导致 `tauri dev` 链接直接失败。本地只做桌面开发/构建，故去掉这两个 crate-type。
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -40,6 +44,10 @@ regex = "1"
 opener = "0.7"
 rexif = "0.7"
 rayon = "1"
+# JPEG 按 DCT 比例解码（1/8、1/4、1/2）—— `image` 只提供整图解码。
+# 这个库里有一批 48837×4360 的长条漫画（单张 2.4 亿像素），整图解码要 700 MB+
+# 内存、10 线程并发直接把内存打爆；按 1/8 解只有 10 MB，快一个数量级。
+jpeg-decoder = "0.3"
 # eaglepack 导入：只开 deflate。默认 features 会拉 bzip2 / zstd / aes（都是 C 依赖），
 # 在 Windows GNU 工具链上要 cc/make，没必要。Eagle 只用 store 与 deflate 两种方式。
 zip = { version = "2", default-features = false, features = ["deflate"] }
