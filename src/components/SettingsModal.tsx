@@ -1,4 +1,4 @@
-import { createSignal, onMount, onCleanup, Show } from "solid-js";
+import { createSignal, onMount, onCleanup, For, Show } from "solid-js";
 import type { JSX } from "solid-js";
 import { api, type GpuMode, type GpuStatus, type ImportSummary, type PackProbe, type PackProgress } from "@/lib/tauri-api";
 import { useLibraryStore, warmForLibrary } from "@/stores/library";
@@ -9,7 +9,12 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { useTheme } from "@/stores/theme";
 import { IconArrowRight, IconClose, IconDatabase, IconEagle, IconPackage, IconPuzzle } from "@/components/icons";
+import { loadAppInfo, type AppInfo } from "@/lib/app-info";
+import { CHANGELOG, notesFor } from "@/lib/changelog";
 import { ExtensionModal } from "./ExtensionModal";
+
+/** 「更新内容」默认展开几个版本，其余折起来 —— 否则一屏全是历史记录。 */
+const NOTES_VISIBLE = 3;
 
 interface Props {
   onClose: () => void;
@@ -44,6 +49,23 @@ export function SettingsModal(props: Props) {
   const [packProgress, setPackProgress] = createSignal<PackProgress | null>(null);
   /** 浏览器扩展子面板（设置内容已经够长了，单独一层更好读） */
   const [extOpen, setExtOpen] = createSignal(false);
+  /** 版本信息：Tauri 内核里读，读不到才退回构建时注入的兜底值 */
+  const [info, setInfo] = createSignal<AppInfo | null>(null);
+  const [allNotes, setAllNotes] = createSignal(false);
+
+  onMount(async () => {
+    setInfo(await loadAppInfo());
+  });
+
+  /** 当前版本的更新内容；万一忘了写 changelog，就退回首条。 */
+  const currentNotes = () => {
+    const v = info()?.version;
+    return (v ? notesFor(v) : null) ?? CHANGELOG[0] ?? null;
+  };
+
+  /** 默认只铺开最新几个版本，历史版本点开再看。 */
+  const visibleNotes = () =>
+    allNotes() ? CHANGELOG : CHANGELOG.slice(0, Math.max(NOTES_VISIBLE, 1));
 
   onMount(async () => {
     try {
@@ -241,7 +263,16 @@ export function SettingsModal(props: Props) {
         style={{ color: s.primary }}
       >
         <div class="flex items-center justify-between mb-5">
-          <h2 class="text-lg font-medium" style={{ color: s.primary }}>设置</h2>
+          <div class="flex items-baseline gap-2">
+            <h2 class="text-lg font-medium" style={{ color: s.primary }}>设置</h2>
+            <Show when={info()}>
+              {(i) => (
+                <span class="text-2xs tabular-nums" style={{ color: s.muted }}>
+                  v{i().version}{i().mode === "dev" ? " · 开发版" : ""}
+                </span>
+              )}
+            </Show>
+          </div>
           <button class="btn-ghost text-sm px-2 flex" onClick={props.onClose} title="关闭">
             <IconClose size={15} />
           </button>
@@ -535,6 +566,83 @@ export function SettingsModal(props: Props) {
           <span style={{ color: s.secondary }}>按 Eagle 里的文件夹层级摆好</span>
           ，&lt;条目ID&gt;.info 这类壳目录直接清掉，同名文件自动加 (2) 序号。
         </div>
+
+        {/* ── 关于 ───────────────────────────────────────────── */}
+        <div class="text-sm mt-6 mb-3" style={{ color: s.secondary }}>关于</div>
+
+        <div class="px-4 py-3 rounded-lg" style={{ background: s.tertiary, border: `1px solid ${s.border}` }}>
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-sm font-medium" style={{ color: s.primary }}>PixVault</div>
+              <div class="text-xs mt-0.5 leading-relaxed" style={{ color: s.muted }}>
+                本地优先的图片资源库：缩略图、索引、评分全在本机生成，不上传任何文件。
+              </div>
+            </div>
+            <div class="text-sm tabular-nums shrink-0" style={{ color: s.accent }}>
+              v{info()?.version ?? "…"}
+            </div>
+          </div>
+
+          <div class="mt-3 grid grid-cols-2 gap-x-5 gap-y-1 text-xs">
+            <InfoLine label="构建方式"
+              value={info() ? (info()!.mode === "dev" ? "开发版（热重载）" : "发行版") : "…"} />
+            <InfoLine label="Tauri" value={info()?.tauriVersion ?? "…"} />
+            <InfoLine label="构建时间" value={info()?.buildTime ?? "…"} />
+            <InfoLine label="版本发布" value={currentNotes()?.date || "—"} />
+          </div>
+        </div>
+
+        {/* ── 更新内容 ───────────────────────────────────────── */}
+        <div class="text-sm mt-5 mb-3" style={{ color: s.secondary }}>更新内容</div>
+
+        <div class="px-4 py-3 rounded-lg" style={{ background: s.tertiary, border: `1px solid ${s.border}` }}>
+          <For each={visibleNotes()}>
+            {(note) => (
+              <div class="mb-4 last:mb-0">
+                <div class="flex items-center gap-2">
+                  <span class="text-xs font-medium tabular-nums" style={{ color: s.primary }}>
+                    v{note.version}
+                  </span>
+                  <Show when={note.date}>
+                    <span class="text-2xs tabular-nums" style={{ color: s.muted }}>{note.date}</span>
+                  </Show>
+                  <Show when={note.version === info()?.version}>
+                    <span class="text-2xs px-1.5 py-0.5 rounded"
+                      style={{ background: "var(--accent-bg)", color: s.accent }}>
+                      当前版本
+                    </span>
+                  </Show>
+                </div>
+
+                <For each={note.groups}>
+                  {(group) => (
+                    <div class="mt-1.5">
+                      <Show when={group.title}>
+                        <div class="text-2xs mb-0.5" style={{ color: s.secondary }}>{group.title}</div>
+                      </Show>
+                      <ul class="flex flex-col gap-1">
+                        <For each={group.items}>
+                          {(item) => (
+                            <li class="flex gap-1.5 text-xs leading-relaxed" style={{ color: s.muted }}>
+                              <span class="shrink-0" style={{ color: s.secondary }}>·</span>
+                              <span>{item}</span>
+                            </li>
+                          )}
+                        </For>
+                      </ul>
+                    </div>
+                  )}
+                </For>
+              </div>
+            )}
+          </For>
+
+          <Show when={CHANGELOG.length > NOTES_VISIBLE}>
+            <button class="btn-secondary text-xs px-2 py-1 mt-1" onClick={() => setAllNotes((v) => !v)}>
+              {allNotes() ? "收起历史版本" : `查看更早的 ${CHANGELOG.length - NOTES_VISIBLE} 个版本`}
+            </button>
+          </Show>
+        </div>
       </div>
 
       {/* 扩展面板叠在设置之上：它自己是一层 fixed 遮罩 */}
@@ -569,6 +677,18 @@ function ImportRow(props: RowProps) {
         <div class="text-xs mt-0.5 leading-relaxed" style={{ color: "var(--text-muted)" }}>{props.desc}</div>
       </div>
       <span class="flex mt-1" style={{ color: "var(--accent)" }}><IconArrowRight size={15} /></span>
+    </div>
+  );
+}
+
+/** 「关于」里的一行键值：左标签右数值，数值过长时省略。 */
+function InfoLine(props: { label: string; value: string }) {
+  return (
+    <div class="flex items-baseline justify-between gap-2 min-w-0">
+      <span class="shrink-0" style={{ color: "var(--text-muted)" }}>{props.label}</span>
+      <span class="truncate tabular-nums" style={{ color: "var(--text-secondary)" }} title={props.value}>
+        {props.value}
+      </span>
     </div>
   );
 }

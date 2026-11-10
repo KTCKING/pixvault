@@ -75,4 +75,7 @@ cp -f "$ROOT_DIR/tailwind.config.ts" \
       "$ROOT_DIR/index.html" \
       "$DEST/" 2>/dev/null || true
 
+# 更新日志：设置面板用 `?raw` 直接读它，缺了这个文件 vite 会直接报模块解析失败
+cp -f "$ROOT_DIR/CHANGELOG.md" "$DEST/" 2>/dev/null || true
+
 echo "✅ 同步完成"
