@@ -140,6 +140,12 @@ export function ThumbnailCard(props: Props) {
           {(src) => (
             <img src={src()} alt={props.file.filename}
               class="w-full h-full object-cover transition-opacity duration-200 relative"
+              // 只对瀑布流生效。瀑布流容器高度是用数据库宽高比算的，和图片真实
+              // 比例只差取整的零点几像素；`cover` 会把这零点几像素均分到上下两边
+              // 啃掉，一排卡片滑过去能看到细缝，钉在 left top 就只从右下角取整，
+              // 肉眼无感。（Pixcall 同样处理：非网格/列表时 object-position: left top）
+              // 网格 / 列表仍是居中裁切 —— 那是构图，不能动。
+              style={props.imageHeight !== undefined ? { "object-position": "left top" } : undefined}
               classList={{ "opacity-0": !imgLoaded(), "opacity-100": imgLoaded() }}
               draggable={false} decoding="async"
               onLoad={() => setImgLoaded(true)} onError={handleImgError} />

@@ -66,14 +66,21 @@ const OVERSCAN_PX = 420;
 const CARD_FOOTER_H = 40;
 
 /**
- * 瀑布流图片区高度相对列宽的上下限。
+ * 瀑布流图片区高度 = 列宽 × 高宽比，**不做视觉夹取**。
  *
- * 不设限的话，一张 200×3000 的长截图会排出 15 倍列高的卡片，滚一屏只有半张图；
- * 反过来一张 3000×200 的全景图会薄成一条线。夹在 0.5–3.0 之间：绝大多数
- * 竖构图 / 横构图都落在区间内（完整显示、不裁切），只有极端长宽比才会被裁。
+ * 这里原本夹在 0.5–3.0 倍列宽之间，结果是：图片区比例 != 图片比例，`object-cover`
+ * 只能裁掉一部分来填满 —— 卡片高度看着有高有低，图片本身却是被切过的，这就是
+ * 之前「瀑布流看着假」的根因。
+ *
+ * 对照 Pixcall 0.9.7（Electron + react-spectrum `WaterfallLayout`）的实现：它对
+ * 真实比例同样不做任何夹取，`maxItemSize` 只用于图片加载前的**估算**高度；一旦
+ * 拿到真实尺寸，高度就是 `列宽 × height / width`，一个像素都不裁。
+ *
+ * 所以这里也只保留挡脏数据的极端值（尺寸字段缺失/损坏算出的 0 或天文数字），
+ * 正常图片一律按真实比例排。
  */
-const MIN_H_RATIO = 0.5;
-const MAX_H_RATIO = 3.0;
+const H_RATIO_GUARD_MIN = 0.02;
+const H_RATIO_GUARD_MAX = 60;
 
 /** 日志里只留路径尾部，避免整条路径刷屏。 */
 const trail = (p: string, n = 42): string => (p.length > n ? `…${p.slice(-n)}` : p);
@@ -502,7 +509,9 @@ export function ThumbnailGrid() {
     if (total === 0 || width <= 0) return null;
 
     const inner = Math.max(card, width - CONTAINER_PAD * 2);
-    const columns = Math.max(1, Math.round((inner + GRID_GAP) / (card + GRID_GAP)));
+    // 和网格用同一个 `floor` 口径（也同 Pixcall：`floor(容器宽 / (最小项宽 + 间距))`）。
+    // 之前这里是 `round`，切模式时列数会差一列、卡片宽度随之跳一下。
+    const columns = Math.max(1, Math.floor((inner + GRID_GAP) / (card + GRID_GAP)));
     const columnWidth = Math.max(1, (inner - GRID_GAP * (columns - 1)) / columns);
 
     const cache = boardCache;
@@ -531,11 +540,11 @@ export function ThumbnailGrid() {
 
     for (let i = from; i < total; i++) {
       const file = list[i];
-      const raw = columnWidth * aspectOf(file);
-      const imageHeight = Math.min(
-        Math.max(raw, columnWidth * MIN_H_RATIO),
-        columnWidth * MAX_H_RATIO,
-      );
+      // 真实比例；只有脏数据（0 / 负数 / 天文数字）才会撞到 guard。
+      const ratio = Math.min(Math.max(aspectOf(file), H_RATIO_GUARD_MIN), H_RATIO_GUARD_MAX);
+      // 取整到整像素：亚像素高度会让 `object-cover` 在底边啃掉半行像素，
+      // 一排卡片滑过去就是一道细缝。
+      const imageHeight = Math.max(1, Math.round(columnWidth * ratio));
 
       // 最短列优先；等高时取索引小的，保证布局稳定可复现。
       let col = 0;
